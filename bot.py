@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 SYMBOL = "SOL/USD:USD"          # Kraken Futures SOL perpetual
 POSITION_SIZE_USD = 10.0
 KILL_SWITCH_DRAWDOWN = 0.05     # halt if equity falls 5% from day-open value
-LOOP_INTERVAL_SECS = 60
+LOOP_INTERVAL_SECS = 10
 RSI_CANDLE_COUNT = 60           # fetch 60 1-minute candles; need ≥15 for RSI-14
+TRADE_COOLDOWN_SECS = 60        # minimum seconds between trades to avoid overtrading
 
 
 class TradingBot:
@@ -31,6 +32,7 @@ class TradingBot:
 
         self._day_open_equity: Optional[float] = None
         self._halted = False
+        self._last_trade_time: float = 0.0
 
     # ------------------------------------------------------------------ #
     # Data helpers                                                         #
@@ -70,8 +72,9 @@ class TradingBot:
         else:
             result = self.exchange.create_market_sell_order(SYMBOL, size)
         logger.info(f"Order id={result['id']} status={result['status']}")
+        self._last_trade_time = time.time()
         bot_state.add_trade({
-            "time": time.time(),
+            "time": self._last_trade_time,
             "action": "ENTER",
             "side": "long" if is_buy else "short",
             "size": size,
@@ -145,23 +148,28 @@ class TradingBot:
             unrealized_pnl=float(pos.get("unrealizedPnl") or 0) if pos else 0.0,
         )
 
-        logger.info(f"Signal={signal} | Position={pos_side or 'FLAT'}")
+        cooldown_remaining = TRADE_COOLDOWN_SECS - (time.time() - self._last_trade_time)
+        in_cooldown = cooldown_remaining > 0
+        logger.info(f"Signal={signal} | Position={pos_side or 'FLAT'}" +
+                    (f" | Cooldown={cooldown_remaining:.0f}s" if in_cooldown else ""))
 
-        if signal == "BUY":
+        # Only trade if price is moving in the signal direction (momentum confirmation)
+        price_rising = closes[-1] > closes[-2]
+        price_falling = closes[-1] < closes[-2]
+
+        if signal == "BUY" and price_rising:
             if pos_side == "SHORT":
                 self._exit(pos)
                 self._enter("BUY", price)
-            elif pos_side is None:
+            elif pos_side is None and not in_cooldown:
                 self._enter("BUY", price)
-            # already LONG → hold
 
-        elif signal == "SELL":
+        elif signal == "SELL" and price_falling:
             if pos_side == "LONG":
                 self._exit(pos)
                 self._enter("SELL", price)
-            elif pos_side is None:
+            elif pos_side is None and not in_cooldown:
                 self._enter("SELL", price)
-            # already SHORT → hold
 
         # HOLD → no action
 
