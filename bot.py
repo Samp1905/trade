@@ -25,7 +25,7 @@ SIGNAL_REFRESH_SECS  = 15       # refresh 1m OHLCV every 15s
 NEWS_REFRESH_SECS    = 60       # CoinGecko poll (rate-limit friendly)
 EQUITY_REFRESH_SECS  = 30
 FIVE_MIN_MOVE_PCT    = 0.10
-CANDLE_BODY_PCT      = 0.0015   # 0.15% candle body — filters noise, confirms momentum
+CANDLE_BODY_PCT      = 0.0005   # 0.05% live candle body — quick momentum trigger
 
 # SOL is always watched; news/5m movers add more coins dynamically
 DEFAULT_WATCHLIST = {"SOL"}
@@ -364,16 +364,16 @@ class TradingBot:
                 if since_last < TRADE_COOLDOWN_SECS:
                     continue
 
-                # Require strategy AND live candle to agree — filters noise
+                # Strategy is the primary trigger; candle momentum is a secondary boost
                 strat  = self._strategy_signal(coin)
                 candle = self._candle_signal(coin)
 
-                if strat != "HOLD" and strat == candle:
-                    signal = strat           # both agree — high confidence
-                elif strat != "HOLD" and candle is None:
-                    signal = strat           # candle neutral, trust strategy alone
+                if strat != "HOLD":
+                    signal = strat           # strategy fires → trade
+                elif candle is not None:
+                    signal = candle          # no strategy signal → candle momentum
                 else:
-                    continue                 # signals conflict or both HOLD
+                    continue
 
                 logger.info(
                     f"{coin}: signal={signal} strategy={active_strategy()} "

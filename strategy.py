@@ -1,14 +1,7 @@
 """
-5-strategy auto-selector based on quantitative research.
-Strategies use VWAP, Stochastic RSI, Supertrend, Bollinger + VWAP, and Donchian.
-Every 60s each strategy is back-tested on the last 100 1m candles; the best wins.
-
-Research basis:
-  - EMA9/21 + RSI(5) + VWAP: 54-65% win rate in trending conditions, PF 1.6-1.8
-  - StochRSI(3,3,14,14) + EMA50: lifts win rate ~5pp and PF 1.3→1.6
-  - Supertrend(10,3) + 5m MTF + volume: PF 1.94, positive skew
-  - VWAP reversion + BB: 49% win rate but strong R:R (institutional fair-value anchor)
-  - Donchian(20) + EMA50: momentum breakout, works well in trending crypto
+5-strategy auto-selector — tuned for active 1m scalping on Kraken Futures demo.
+Strategies use VWAP, StochRSI, Supertrend, Bollinger+VWAP, and Donchian.
+Every 60s each is back-tested on the last 100 candles; the best wins.
 """
 import logging
 import time
@@ -52,7 +45,6 @@ def _rsi(closes: List[float], period: int = 14) -> float:
 
 def _stoch_rsi(closes: List[float], k_smooth: int = 3, d_smooth: int = 3,
                rsi_len: int = 14, stoch_len: int = 14):
-    """Returns (K, D) of Stochastic RSI."""
     needed = rsi_len + stoch_len + k_smooth + d_smooth + 2
     if len(closes) < needed:
         return 50.0, 50.0
@@ -68,12 +60,10 @@ def _stoch_rsi(closes: List[float], k_smooth: int = 3, d_smooth: int = 3,
               for i in range(k_smooth, len(stoch) + 1)]
     if len(k_vals) < d_smooth:
         return 50.0, 50.0
-    d_val = sum(k_vals[-d_smooth:]) / d_smooth
-    return k_vals[-1], d_val
+    return k_vals[-1], sum(k_vals[-d_smooth:]) / d_smooth
 
 
 def _vwap(ohlcv: List) -> float:
-    """Volume-weighted average price over the provided candles."""
     cum_tv, cum_v = 0.0, 0.0
     for c in ohlcv:
         tp = (c[2] + c[3] + c[4]) / 3
@@ -83,156 +73,121 @@ def _vwap(ohlcv: List) -> float:
     return cum_tv / cum_v if cum_v > 0 else (ohlcv[-1][4] if ohlcv else 0.0)
 
 
-def _atr(ohlcv: List, period: int = 10) -> float:
-    if len(ohlcv) < period + 1:
-        return 0.0
-    trs = []
-    for i in range(1, len(ohlcv)):
-        h, l, pc = ohlcv[i][2], ohlcv[i][3], ohlcv[i - 1][4]
-        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-    atr = sum(trs[:period]) / period
-    for t in trs[period:]:
-        atr = (atr * (period - 1) + t) / period
-    return atr
-
-
 def _supertrend(ohlcv: List, period: int = 10, mult: float = 3.0) -> str:
-    """Returns 'up' or 'down' for the last bar's Supertrend direction."""
     if len(ohlcv) < period + 2:
         return "up"
     highs  = [c[2] for c in ohlcv]
     lows   = [c[3] for c in ohlcv]
     closes = [c[4] for c in ohlcv]
     n = len(ohlcv)
-
     tr_list = [highs[0] - lows[0]]
     for i in range(1, n):
         tr_list.append(max(highs[i] - lows[i],
                            abs(highs[i] - closes[i - 1]),
                            abs(lows[i]  - closes[i - 1])))
-
     atr_list = [sum(tr_list[:period]) / period]
     for i in range(period, n):
         atr_list.append((atr_list[-1] * (period - 1) + tr_list[i]) / period)
-
-    direction = 1   # 1=up, -1=down
+    direction = 1
     prev_upper = prev_lower = 0.0
-
     for i in range(period - 1, n):
         atr   = atr_list[i - period + 1]
         hl2   = (highs[i] + lows[i]) / 2
         b_up  = hl2 + mult * atr
         b_lo  = hl2 - mult * atr
-
         if i == period - 1:
             f_up, f_lo = b_up, b_lo
         else:
             f_up = b_up if (b_up < prev_upper or closes[i - 1] > prev_upper) else prev_upper
             f_lo = b_lo if (b_lo > prev_lower or closes[i - 1] < prev_lower) else prev_lower
-
         if closes[i] > f_up:
             direction = 1
         elif closes[i] < f_lo:
             direction = -1
-
         prev_upper, prev_lower = f_up, f_lo
-
     return "up" if direction == 1 else "down"
 
-
-def _vol_spike(ohlcv: List, window: int = 20, factor: float = 1.5) -> bool:
-    if len(ohlcv) < window + 1:
-        return False
-    vols = [c[5] for c in ohlcv]
-    avg  = sum(vols[-window - 1:-1]) / window
-    return vols[-1] > avg * factor if avg > 0 else False
-
 # ------------------------------------------------------------------ #
-# Strategies — all accept (ohlcv_1m, ohlcv_5m=None)                  #
+# Strategies                                                          #
 # ------------------------------------------------------------------ #
 
 def strategy_vwap_ema_rsi(ohlcv: List, _=None) -> Signal:
-    """EMA 9/21 crossover + RSI(5) pullback + VWAP trend filter."""
+    """
+    VWAP bias + EMA9/21 alignment.
+    Fires whenever price and both EMAs agree on direction relative to VWAP.
+    """
     if len(ohlcv) < 25:
         return "HOLD"
     closes = [c[4] for c in ohlcv]
-    vwap  = _vwap(ohlcv)
-    price = closes[-1]
-    e9p, e21p = _ema(closes[:-1], 9), _ema(closes[:-1], 21)
-    e9,  e21  = _ema(closes, 9),      _ema(closes, 21)
-    rsi5 = _rsi(closes, 5)
-    if price > vwap and e9p <= e21p and e9 > e21 and rsi5 < 35:
+    vwap   = _vwap(ohlcv)
+    price  = closes[-1]
+    e9     = _ema(closes, 9)
+    e21    = _ema(closes, 21)
+    if price > vwap and e9 > e21:
         return "BUY"
-    if price < vwap and e9p >= e21p and e9 < e21 and rsi5 > 65:
+    if price < vwap and e9 < e21:
         return "SELL"
     return "HOLD"
 
 
 def strategy_stoch_rsi_ema50(ohlcv: List, _=None) -> Signal:
-    """StochRSI(3,3,14,14) crossover from extreme, filtered by EMA 50 bias."""
+    """StochRSI extreme zones filtered by EMA 50 bias."""
     if len(ohlcv) < 55:
         return "HOLD"
     closes = [c[4] for c in ohlcv]
-    ema50 = _ema(closes, 50)
-    price = closes[-1]
-    k,    _ = _stoch_rsi(closes)
-    k_prev, _ = _stoch_rsi(closes[:-1])
-    if price > ema50 and k_prev <= 20 and k > 20:
+    ema50  = _ema(closes, 50)
+    price  = closes[-1]
+    k, _   = _stoch_rsi(closes)
+    if price > ema50 and k < 25:     # oversold in uptrend
         return "BUY"
-    if price < ema50 and k_prev >= 80 and k < 80:
+    if price < ema50 and k > 75:     # overbought in downtrend
         return "SELL"
     return "HOLD"
 
 
 def strategy_supertrend_mtf(ohlcv: List, ohlcv_5m: Optional[List] = None) -> Signal:
-    """Supertrend(10,3) flip on 1m + volume spike + optional 5m alignment."""
+    """Supertrend(10,3) flip on 1m, optionally confirmed by 5m direction."""
     if len(ohlcv) < 15:
         return "HOLD"
     st_now  = _supertrend(ohlcv)
     st_prev = _supertrend(ohlcv[:-1])
     if st_now == st_prev:
-        return "HOLD"             # no flip — no signal
-    if not _vol_spike(ohlcv):
-        return "HOLD"             # flip without volume is noise
+        return "HOLD"
     if ohlcv_5m and len(ohlcv_5m) >= 15:
-        st_5m = _supertrend(ohlcv_5m)
-        if st_now != st_5m:
-            return "HOLD"         # 5m trend disagrees — skip
+        if _supertrend(ohlcv_5m) != st_now:
+            return "HOLD"
     return "BUY" if st_now == "up" else "SELL"
 
 
 def strategy_vwap_bb_reversion(ohlcv: List, _=None) -> Signal:
-    """Price at Bollinger extreme while near VWAP — institutional mean-reversion."""
+    """Price beyond 1.8σ Bollinger Band and on the VWAP side — mean reversion."""
     if len(ohlcv) < 22:
         return "HOLD"
     closes = [c[4] for c in ohlcv]
-    vwap  = _vwap(ohlcv)
-    price = closes[-1]
-    w     = closes[-20:]
-    mean  = sum(w) / 20
-    std   = (sum((x - mean) ** 2 for x in w) / 20) ** 0.5
+    vwap   = _vwap(ohlcv)
+    price  = closes[-1]
+    w      = closes[-20:]
+    mean   = sum(w) / 20
+    std    = (sum((x - mean) ** 2 for x in w) / 20) ** 0.5
     if std == 0:
         return "HOLD"
-    high_vol = _vol_spike(ohlcv)
-    if price < mean - 2 * std and price > vwap * 0.997 and high_vol:
+    if price < mean - 1.8 * std and price > vwap * 0.998:
         return "BUY"
-    if price > mean + 2 * std and price < vwap * 1.003 and high_vol:
+    if price > mean + 1.8 * std and price < vwap * 1.002:
         return "SELL"
     return "HOLD"
 
 
 def strategy_donchian_breakout(ohlcv: List, _=None) -> Signal:
-    """Donchian(20) breakout in direction of EMA 50 with volume confirmation."""
+    """Donchian(20) channel breakout in direction of EMA 50."""
     if len(ohlcv) < 55:
         return "HOLD"
     closes = [c[4] for c in ohlcv]
-    ema50 = _ema(closes, 50)
-    price = closes[-1]
-    prev  = closes[-2]
-    upper = max(closes[-21:-1])
-    lower = min(closes[-21:-1])
-    if not _vol_spike(ohlcv):
-        return "HOLD"
+    ema50  = _ema(closes, 50)
+    price  = closes[-1]
+    prev   = closes[-2]
+    upper  = max(closes[-21:-1])
+    lower  = min(closes[-21:-1])
     if prev <= upper and price > upper and price > ema50:
         return "BUY"
     if prev >= lower and price < lower and price < ema50:
@@ -288,7 +243,20 @@ def get_signal(ohlcv: List, ohlcv_5m: Optional[List] = None) -> Signal:
     if now - _last_eval > SELECTOR_TTL and len(ohlcv) >= MIN_HISTORY + LOOKAHEAD:
         _reselect(ohlcv, ohlcv_5m)
         _last_eval = now
-    return STRATEGIES[_active](ohlcv, ohlcv_5m)
+
+    # Primary: best-scored strategy
+    sig = STRATEGIES[_active](ohlcv, ohlcv_5m)
+    if sig != "HOLD":
+        return sig
+
+    # Fallback: scan remaining strategies — first non-HOLD wins
+    for name, fn in STRATEGIES.items():
+        if name == _active:
+            continue
+        s = fn(ohlcv, ohlcv_5m)
+        if s != "HOLD":
+            return s
+    return "HOLD"
 
 
 def active_strategy() -> str:
