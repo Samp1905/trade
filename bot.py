@@ -115,27 +115,39 @@ class TradingBot:
     # ------------------------------------------------------------------ #
 
     def _limit_ioc(self, sym: str, side: str, size: float,
-                   ref_price: float, params: dict = None) -> dict:
-        """Limit IOC order at ref_price ± slippage — avoids Kraken price-collar rejection."""
+                   ask: float, bid: float, params: dict = None) -> dict:
+        """Limit IOC using live ask/bid so the order crosses the spread immediately."""
         is_buy = side == "buy"
-        lp = ref_price * (1 + SLIPPAGE_PCT) if is_buy else ref_price * (1 - SLIPPAGE_PCT)
+        # Buy above ask, sell below bid — guarantees crossing the spread
+        ref = ask if is_buy else bid
+        lp = ref * (1 + SLIPPAGE_PCT) if is_buy else ref * (1 - SLIPPAGE_PCT)
         lp = float(self.exchange.price_to_precision(sym, lp))
         p = {"timeInForce": "ioc", **(params or {})}
+        logger.debug(f"limit-IOC {side} {sym} size={size} lp={lp:.4f} (ask={ask:.4f} bid={bid:.4f})")
         return (self.exchange.create_limit_buy_order(sym, size, lp, params=p)
                 if is_buy else
                 self.exchange.create_limit_sell_order(sym, size, lp, params=p))
+
+    def _fetch_bid_ask(self, sym: str) -> tuple:
+        """Returns (last, ask, bid) from a fresh ticker."""
+        t = self.exchange.fetch_ticker(sym)
+        last = float(t["last"] or 0)
+        ask = float(t["ask"] or last)
+        bid = float(t["bid"] or last)
+        return last, ask, bid
 
     def _enter(self, coin: str, signal: str, price: float) -> None:
         sym = _sym(coin)
         is_buy = signal == "BUY"
         size = float(self.exchange.amount_to_precision(sym, POSITION_SIZE_USD / price))
-        logger.info(f"ENTER {'LONG' if is_buy else 'SHORT'} {size} {sym} @ ~${price:.4f}")
-        result = self._limit_ioc(sym, "buy" if is_buy else "sell", size, price)
+        last, ask, bid = self._fetch_bid_ask(sym)
+        logger.info(f"ENTER {'LONG' if is_buy else 'SHORT'} {size} {sym} @ ~${last:.4f}")
+        result = self._limit_ioc(sym, "buy" if is_buy else "sell", size, ask, bid)
         self._last_trade_time[coin] = time.time()
         bot_state.add_trade({
             "time": time.time(), "action": "ENTER", "coin": coin,
             "side": "long" if is_buy else "short",
-            "size": size, "price": price, "order_id": result.get("id"),
+            "size": size, "price": last, "order_id": result.get("id"),
         })
         logger.info(f"Order {result.get('id')} {result.get('status')}")
 
@@ -143,14 +155,13 @@ class TradingBot:
         sym = _sym(coin)
         size = abs(float(pos["contracts"]))
         side = pos["side"]
-        price = float(self.exchange.fetch_ticker(sym)["last"])
-        # sell to exit long, buy to exit short; reduceOnly + IOC avoids price-collar error
+        last, ask, bid = self._fetch_bid_ask(sym)
         exit_side = "sell" if side == "long" else "buy"
-        result = self._limit_ioc(sym, exit_side, size, price, {"reduceOnly": True})
-        logger.info(f"{reason} {side.upper()} {size} {sym} @ ~${price:.4f}")
+        result = self._limit_ioc(sym, exit_side, size, ask, bid, {"reduceOnly": True})
+        logger.info(f"{reason} {side.upper()} {size} {sym} @ ~${last:.4f}")
         bot_state.add_trade({
             "time": time.time(), "action": reason, "coin": coin,
-            "side": side, "size": size, "price": price,
+            "side": side, "size": size, "price": last,
             "order_id": result.get("id"),
         })
 
