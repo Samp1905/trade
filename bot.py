@@ -24,7 +24,6 @@ MAX_POSITIONS       = 3
 SIGNAL_REFRESH_SECS = 60        # re-evaluate strategy on 1m candles every 60s
 EQUITY_REFRESH_SECS = 30
 FIVE_MIN_MOVE_PCT   = 0.10
-SLIPPAGE_PCT        = 0.003     # 0.3% limit-IOC slippage to stay inside price collar
 
 # SOL is always watched; news/5m movers add more coins dynamically
 DEFAULT_WATCHLIST  = {"SOL"}
@@ -114,16 +113,17 @@ class TradingBot:
     # Order helpers                                                        #
     # ------------------------------------------------------------------ #
 
-    def _limit_ioc(self, sym: str, side: str, size: float,
-                   ask: float, bid: float, params: dict = None) -> dict:
-        """Limit IOC using live ask/bid so the order crosses the spread immediately."""
+    def _place_order(self, sym: str, side: str, size: float,
+                     ask: float, bid: float, params: dict = None) -> dict:
+        """
+        Limit GTC at the current ask (buy) or bid (sell).
+        Exact ask/bid stays inside the price collar; GTC means it fills when
+        the market touches that price rather than being cancelled if the tick moves.
+        """
         is_buy = side == "buy"
-        # Buy above ask, sell below bid — guarantees crossing the spread
-        ref = ask if is_buy else bid
-        lp = ref * (1 + SLIPPAGE_PCT) if is_buy else ref * (1 - SLIPPAGE_PCT)
-        lp = float(self.exchange.price_to_precision(sym, lp))
-        p = {"timeInForce": "ioc", **(params or {})}
-        logger.debug(f"limit-IOC {side} {sym} size={size} lp={lp:.4f} (ask={ask:.4f} bid={bid:.4f})")
+        lp = float(self.exchange.price_to_precision(sym, ask if is_buy else bid))
+        p = {**(params or {})}
+        logger.debug(f"order {side} {sym} size={size} lp={lp:.4f} (ask={ask:.4f} bid={bid:.4f})")
         return (self.exchange.create_limit_buy_order(sym, size, lp, params=p)
                 if is_buy else
                 self.exchange.create_limit_sell_order(sym, size, lp, params=p))
@@ -142,7 +142,7 @@ class TradingBot:
         size = float(self.exchange.amount_to_precision(sym, POSITION_SIZE_USD / price))
         last, ask, bid = self._fetch_bid_ask(sym)
         logger.info(f"ENTER {'LONG' if is_buy else 'SHORT'} {size} {sym} @ ~${last:.4f}")
-        result = self._limit_ioc(sym, "buy" if is_buy else "sell", size, ask, bid)
+        result = self._place_order(sym, "buy" if is_buy else "sell", size, ask, bid)
         self._last_trade_time[coin] = time.time()
         bot_state.add_trade({
             "time": time.time(), "action": "ENTER", "coin": coin,
@@ -157,7 +157,7 @@ class TradingBot:
         side = pos["side"]
         last, ask, bid = self._fetch_bid_ask(sym)
         exit_side = "sell" if side == "long" else "buy"
-        result = self._limit_ioc(sym, exit_side, size, ask, bid, {"reduceOnly": True})
+        result = self._place_order(sym, exit_side, size, ask, bid, {"reduceOnly": True})
         logger.info(f"{reason} {side.upper()} {size} {sym} @ ~${last:.4f}")
         bot_state.add_trade({
             "time": time.time(), "action": reason, "coin": coin,
