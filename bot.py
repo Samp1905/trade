@@ -22,6 +22,7 @@ TRADE_COOLDOWN_SECS = 60
 NEWS_REFRESH_SECS = 60
 MAX_POSITIONS = 3           # max concurrent open positions
 STOP_LOSS_PCT = 0.10        # close position if loss reaches 10% of entry value
+FIVE_MIN_MOVE_PCT = 0.10    # enter trade if coin moves 10%+ on the 5m chart
 
 
 def _sym(coin: str) -> str:
@@ -140,12 +141,39 @@ class TradingBot:
             return False
         return (self._day_open_equity - equity) / self._day_open_equity >= KILL_SWITCH_DRAWDOWN
 
+    def _scan_5m_movers(self) -> Dict[str, str]:
+        """Return {coin: BUY/SELL} for any coin that moved 10%+ on the last 5m candle."""
+        from news import COIN_MAP
+        signals = {}
+        for coin in COIN_MAP.values():
+            try:
+                sym = _sym(coin)
+                if sym not in self.exchange.markets:
+                    continue
+                ohlcv = self.exchange.fetch_ohlcv(sym, "5m", limit=2)
+                if len(ohlcv) < 2:
+                    continue
+                o, c = ohlcv[-2][1], ohlcv[-2][4]  # last completed candle open/close
+                if o == 0:
+                    continue
+                move = (c - o) / o
+                if move >= FIVE_MIN_MOVE_PCT:
+                    signals[coin] = "BUY"
+                    logger.info(f"5m mover: {coin} +{move*100:.1f}% — BUY signal")
+                elif move <= -FIVE_MIN_MOVE_PCT:
+                    signals[coin] = "SELL"
+                    logger.info(f"5m mover: {coin} {move*100:.1f}% — SELL signal")
+            except Exception as e:
+                logger.debug(f"5m scan error {coin}: {e}")
+        return signals
+
     def _refresh_news(self) -> None:
-        if not self._news_api_key:
-            return
         if time.time() - self._last_news_refresh < NEWS_REFRESH_SECS:
             return
-        self._news_signals = get_news_signals(self._news_api_key)
+        news = get_news_signals()
+        movers = self._scan_5m_movers()
+        # Merge: 5m movers take priority over news signals
+        self._news_signals = {**news, **movers}
         self._last_news_refresh = time.time()
         bot_state.update(news_signals=self._news_signals)
 
