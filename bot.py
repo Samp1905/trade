@@ -54,6 +54,7 @@ class TradingBot:
         self._prev_prices: Dict[str, float] = {}    # for tick momentum
         self._strat_signals: Dict[str, str] = {}    # cached strategy signals per coin
         self._last_strat_time: Dict[str, float] = {}
+        bot_state.register_close(self._close_by_coin)
 
     # ------------------------------------------------------------------ #
     # Data helpers                                                         #
@@ -142,6 +143,20 @@ class TradingBot:
             "side": side, "size": size, "price": price,
             "order_id": result.get("id"),
         })
+
+    def _close_by_coin(self, coin: str) -> dict:
+        """Called from dashboard manual-close button."""
+        positions = self._all_positions()
+        if coin == "__all__":
+            closed = []
+            for c, pos in positions.items():
+                self._exit(c, pos, reason="MANUAL")
+                closed.append(c)
+            return {"closed": closed}
+        if coin not in positions:
+            return {"error": f"no open position for {coin}"}
+        self._exit(coin, positions[coin], reason="MANUAL")
+        return {"closed": [coin]}
 
     # ------------------------------------------------------------------ #
     # Risk checks (run every tick)                                         #

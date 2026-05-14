@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 from state import bot_state
 
 app = Flask(__name__)
@@ -93,10 +93,13 @@ _HTML = """<!DOCTYPE html>
 
   <!-- Open positions table -->
   <div class="card p-3 mb-3">
-    <div class="card-title mb-2">Open Positions</div>
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <div class="card-title mb-0">Open Positions</div>
+      <button id="close-all-btn" class="btn btn-sm btn-danger d-none" onclick="closePosition('__all__')">Close All</button>
+    </div>
     <div id="no-positions" class="text-secondary">Flat — no open positions.</div>
     <table id="pos-table" class="table table-dark table-sm mb-0" style="display:none">
-      <thead><tr><th>Coin</th><th>Side</th><th>Size</th><th>Entry</th><th>Unrealized P&amp;L</th></tr></thead>
+      <thead><tr><th>Coin</th><th>Side</th><th>Size</th><th>Entry</th><th>Unrealized P&amp;L</th><th></th></tr></thead>
       <tbody id="pos-body"></tbody>
     </table>
   </div>
@@ -156,12 +159,15 @@ async function refresh() {
 
   // Open positions
   const positions = s.positions || [];
+  const closeAllBtn = document.getElementById('close-all-btn');
   if (positions.length === 0) {
     document.getElementById('no-positions').style.display = '';
     document.getElementById('pos-table').style.display = 'none';
+    closeAllBtn.classList.add('d-none');
   } else {
     document.getElementById('no-positions').style.display = 'none';
     document.getElementById('pos-table').style.display = '';
+    closeAllBtn.classList.remove('d-none');
     document.getElementById('pos-body').innerHTML = positions.map(p => `
       <tr>
         <td class="fw-semibold">${p.coin}</td>
@@ -169,6 +175,7 @@ async function refresh() {
         <td>${fmt(p.size, 4)}</td>
         <td>$${fmt(p.entry_px, 4)}</td>
         <td class="${p.upnl >= 0 ? 'positive' : 'negative'}">${p.upnl >= 0 ? '+' : ''}$${fmt(p.upnl, 2)}</td>
+        <td><button class="btn btn-xs btn-outline-danger py-0 px-2" style="font-size:.75rem" onclick="closePosition('${p.coin}')">Close</button></td>
       </tr>`).join('');
   }
 
@@ -193,6 +200,17 @@ async function refresh() {
   }
 }
 
+async function closePosition(coin) {
+  const label = coin === '__all__' ? 'ALL positions' : coin;
+  if (!confirm(`Close ${label}?`)) return;
+  try {
+    const res = await fetch(`/api/close/${coin}`, {method: 'POST'});
+    const data = await res.json();
+    if (data.error) { alert('Error: ' + data.error); }
+    else { await refresh(); }
+  } catch(e) { alert('Request failed: ' + e); }
+}
+
 refresh();
 setInterval(refresh, 5000);
 </script>
@@ -208,3 +226,8 @@ def index():
 @app.route("/api/state")
 def api_state():
     return jsonify(bot_state.to_dict())
+
+
+@app.route("/api/close/<coin>", methods=["POST"])
+def api_close(coin):
+    return jsonify(bot_state.manual_close(coin))

@@ -1,5 +1,5 @@
 from threading import Lock
-from typing import Optional
+from typing import Callable, Optional
 
 KILL_SWITCH_DRAWDOWN = 0.05
 
@@ -16,6 +16,19 @@ class BotState:
         self.halted: bool = False
         self.last_tick: Optional[float] = None
         self.recent_trades: list = []
+        self._close_fn: Optional[Callable[[str], dict]] = None
+
+    def register_close(self, fn: Callable[[str], dict]) -> None:
+        self._close_fn = fn
+
+    def manual_close(self, coin: str) -> dict:
+        fn = self._close_fn
+        if fn is None:
+            return {"error": "bot not ready"}
+        try:
+            return fn(coin)
+        except Exception as e:
+            return {"error": str(e)}
 
     def update(self, **kwargs) -> None:
         with self._lock:
