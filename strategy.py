@@ -11,12 +11,12 @@ Signal = Literal["BUY", "SELL", "HOLD"]
 
 logger = logging.getLogger(__name__)
 
-SELECTOR_TTL   = 60    # re-score strategies every 60 seconds
-LOOKAHEAD      = 3     # candles ahead to judge if a signal was correct
-MIN_HISTORY    = 35    # minimum candles needed to score
+SELECTOR_TTL = 60
+LOOKAHEAD    = 3
+MIN_HISTORY  = 35
 
 # ------------------------------------------------------------------ #
-# Shared indicators                                                   #
+# Indicators                                                          #
 # ------------------------------------------------------------------ #
 
 def _ema(closes: List[float], period: int) -> float:
@@ -40,12 +40,41 @@ def _rsi(closes: List[float], period: int = 14) -> float:
         al = (al * (period - 1) + losses[i]) / period
     return 100.0 if al == 0 else 100.0 - (100.0 / (1.0 + ag / al))
 
+
+def _trend(closes: List[float], lookback: int = 5) -> int:
+    """Returns +1 (uptrend), -1 (downtrend), 0 (flat) over last N closes."""
+    if len(closes) < lookback + 1:
+        return 0
+    window = closes[-lookback:]
+    ups = sum(1 for i in range(1, len(window)) if window[i] > window[i - 1])
+    downs = sum(1 for i in range(1, len(window)) if window[i] < window[i - 1])
+    if ups >= lookback - 1:
+        return 1
+    if downs >= lookback - 1:
+        return -1
+    return 0
+
 # ------------------------------------------------------------------ #
 # Strategies                                                          #
 # ------------------------------------------------------------------ #
 
+def strategy_trend_ema(closes: List[float]) -> Signal:
+    """EMA crossover confirmed by short-term price trend — filters false crossovers."""
+    if len(closes) < 23:
+        return "HOLD"
+    fp, sp = _ema(closes[:-1], 9), _ema(closes[:-1], 21)
+    fc, sc = _ema(closes, 9),      _ema(closes, 21)
+    rsi = _rsi(closes)
+    t = _trend(closes, 5)
+    if fp <= sp and fc > sc and rsi < 60 and t == 1:
+        return "BUY"
+    if fp >= sp and fc < sc and rsi > 40 and t == -1:
+        return "SELL"
+    return "HOLD"
+
+
 def strategy_ema_crossover(closes: List[float]) -> Signal:
-    """9/21 EMA crossover with RSI filter — good in trending markets."""
+    """9/21 EMA crossover with RSI filter."""
     if len(closes) < 23:
         return "HOLD"
     fp, sp = _ema(closes[:-1], 9), _ema(closes[:-1], 21)
@@ -59,19 +88,20 @@ def strategy_ema_crossover(closes: List[float]) -> Signal:
 
 
 def strategy_rsi(closes: List[float]) -> Signal:
-    """RSI extremes — good in ranging markets."""
+    """RSI extremes with trend confirmation — avoids catching falling knives."""
     if len(closes) < 16:
         return "HOLD"
     rsi = _rsi(closes)
-    if rsi < 30:
+    t = _trend(closes, 3)
+    if rsi < 32 and t == 1:    # oversold AND starting to recover
         return "BUY"
-    if rsi > 70:
+    if rsi > 68 and t == -1:   # overbought AND starting to drop
         return "SELL"
     return "HOLD"
 
 
 def strategy_macd(closes: List[float]) -> Signal:
-    """MACD line crossing zero — good for momentum shifts."""
+    """MACD line crossing zero — momentum shift."""
     if len(closes) < 35:
         return "HOLD"
     macd_prev = _ema(closes[:-1], 12) - _ema(closes[:-1], 26)
@@ -84,7 +114,7 @@ def strategy_macd(closes: List[float]) -> Signal:
 
 
 def strategy_bollinger(closes: List[float], period: int = 20) -> Signal:
-    """Bollinger Bands mean reversion — good for choppy markets."""
+    """Bollinger Bands mean reversion with trend gate."""
     if len(closes) < period + 1:
         return "HOLD"
     window = closes[-period:]
@@ -93,14 +123,16 @@ def strategy_bollinger(closes: List[float], period: int = 20) -> Signal:
     if std == 0:
         return "HOLD"
     price = closes[-1]
-    if price < mean - 2 * std:
+    t = _trend(closes, 3)
+    if price < mean - 2 * std and t == 1:
         return "BUY"
-    if price > mean + 2 * std:
+    if price > mean + 2 * std and t == -1:
         return "SELL"
     return "HOLD"
 
 
 STRATEGIES: Dict[str, Callable] = {
+    "Trend+EMA":      strategy_trend_ema,
     "EMA Crossover":  strategy_ema_crossover,
     "RSI":            strategy_rsi,
     "MACD":           strategy_macd,
@@ -111,12 +143,11 @@ STRATEGIES: Dict[str, Callable] = {
 # Auto-selector                                                       #
 # ------------------------------------------------------------------ #
 
-_active: str   = "EMA Crossover"
+_active: str      = "Trend+EMA"
 _last_eval: float = 0.0
 
 
 def _score(fn: Callable, closes: List[float]) -> float:
-    """Win rate of strategy on recent candle history (0.0 – 1.0)."""
     wins = losses = 0
     for i in range(MIN_HISTORY, len(closes) - LOOKAHEAD):
         sig = fn(closes[:i])

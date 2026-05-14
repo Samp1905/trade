@@ -18,14 +18,14 @@ POSITION_SIZE_USD    = 2000.0
 KILL_SWITCH_DRAWDOWN = 0.05
 LOOP_INTERVAL_SECS   = 10       # tick every 10s — catches every candle move
 TRADE_COOLDOWN_SECS  = 10       # re-entry allowed 10s after last trade
-TAKE_PROFIT_USD      = 0.01     # exit at $0.01 profit
-STOP_LOSS_PCT        = 0.10     # exit at 10% loss
+TAKE_PROFIT_PCT      = 0.001    # exit at 0.1% price gain (~$2 on $2000)
+STOP_LOSS_PCT        = 0.003    # exit at 0.3% price loss (~$6 on $2000) — 1:3 R/R
 MAX_POSITIONS        = 20
 SIGNAL_REFRESH_SECS  = 15       # refresh 1m OHLCV every 15s
 NEWS_REFRESH_SECS    = 60       # CoinGecko poll (rate-limit friendly)
 EQUITY_REFRESH_SECS  = 30
 FIVE_MIN_MOVE_PCT    = 0.10
-CANDLE_BODY_PCT      = 0.0005   # 0.05% live candle body triggers momentum entry
+CANDLE_BODY_PCT      = 0.0015   # 0.15% candle body — filters noise, confirms momentum
 
 # SOL is always watched; news/5m movers add more coins dynamically
 DEFAULT_WATCHLIST = {"SOL"}
@@ -237,11 +237,11 @@ class TradingBot:
             current = prices.get(coin, 0)
             if current == 0:
                 continue
-            size = abs(float(pos["contracts"]))
             side = pos["side"]
-            upnl = ((current - entry) if side == "long" else (entry - current)) * size
-            if upnl >= TAKE_PROFIT_USD:
-                logger.info(f"TAKE PROFIT {coin} +${upnl:.4f}")
+            gain_pct = ((current - entry) / entry if side == "long"
+                        else (entry - current) / entry)
+            if gain_pct >= TAKE_PROFIT_PCT:
+                logger.info(f"TAKE PROFIT {coin} +{gain_pct*100:.3f}%")
                 self._exit(coin, pos, reason="TAKE PROFIT")
                 positions.pop(coin, None)
 
@@ -349,15 +349,16 @@ class TradingBot:
                 if since_last < TRADE_COOLDOWN_SECS:
                     continue
 
-                # Strategy signal (EMA/RSI/MACD/BB on 1m closes)
-                signal = self._strategy_signal(coin)
+                # Require strategy AND live candle to agree — filters noise
+                strat  = self._strategy_signal(coin)
+                candle = self._candle_signal(coin)
 
-                # Live candle-body momentum overrides HOLD
-                if signal == "HOLD":
-                    signal = self._candle_signal(coin)
-
-                if not signal or signal == "HOLD":
-                    continue
+                if strat != "HOLD" and strat == candle:
+                    signal = strat           # both agree — high confidence
+                elif strat != "HOLD" and candle is None:
+                    signal = strat           # candle neutral, trust strategy alone
+                else:
+                    continue                 # signals conflict or both HOLD
 
                 logger.info(
                     f"{coin}: signal={signal} strategy={active_strategy()} "
