@@ -14,7 +14,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-POSITION_SIZE_USD    = 10.0
+POSITION_SIZE_USD    = 2000.0
 KILL_SWITCH_DRAWDOWN = 0.05
 LOOP_INTERVAL_SECS   = 10       # tick every 10s — catches every candle move
 TRADE_COOLDOWN_SECS  = 10       # re-entry allowed 10s after last trade
