@@ -167,10 +167,24 @@ class TradingBot:
         bid = float(t["bid"] or last)
         return last, ask, bid
 
+    def _cancel_open_orders(self, coin: str) -> None:
+        """Cancel any resting orders for coin to prevent selfFill on exit."""
+        sym = _sym(coin)
+        try:
+            for o in self.exchange.fetch_open_orders(sym):
+                try:
+                    self.exchange.cancel_order(o["id"], sym)
+                    logger.debug(f"Cancelled resting order {o['id']} for {coin}")
+                except Exception as e:
+                    logger.debug(f"Cancel {o['id']}: {e}")
+        except Exception as e:
+            logger.debug(f"fetch_open_orders {coin}: {e}")
+
     def _enter(self, coin: str, signal: str, price: float) -> None:
         sym = _sym(coin)
         is_buy = signal == "BUY"
         size = float(self.exchange.amount_to_precision(sym, POSITION_SIZE_USD / price))
+        self._cancel_open_orders(coin)
         last, ask, bid = self._fetch_bid_ask(sym)
         logger.info(f"ENTER {'LONG' if is_buy else 'SHORT'} {size} {sym} @ ~${last:.4f}")
         result = self._place_order(sym, "buy" if is_buy else "sell", size, ask, bid)
@@ -186,6 +200,7 @@ class TradingBot:
         sym = _sym(coin)
         size = abs(float(pos["contracts"]))
         side = pos["side"]
+        self._cancel_open_orders(coin)
         last, ask, bid = self._fetch_bid_ask(sym)
         exit_side = "sell" if side == "long" else "buy"
         result = self._place_order(sym, exit_side, size, ask, bid, {"reduceOnly": True})
