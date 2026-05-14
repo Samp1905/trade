@@ -18,8 +18,8 @@ POSITION_SIZE_USD    = 2000.0
 KILL_SWITCH_DRAWDOWN = 0.05
 LOOP_INTERVAL_SECS   = 10       # tick every 10s — catches every candle move
 TRADE_COOLDOWN_SECS  = 10       # re-entry allowed 10s after last trade
-TAKE_PROFIT_PCT      = 0.001    # exit at 0.1% price gain (~$2 on $2000)
-STOP_LOSS_PCT        = 0.003    # exit at 0.3% price loss (~$6 on $2000) — 1:3 R/R
+TAKE_PROFIT_PCT      = 0.0015   # exit at 0.15% price gain (~$3 on $2000)
+STOP_LOSS_PCT        = 0.001    # exit at 0.10% price loss (~$2 on $2000) — 1.5:1 R/R
 MAX_POSITIONS        = 20
 SIGNAL_REFRESH_SECS  = 15       # refresh 1m OHLCV every 15s
 NEWS_REFRESH_SECS    = 60       # CoinGecko poll (rate-limit friendly)
@@ -57,6 +57,8 @@ class TradingBot:
         # Shared OHLCV cache — one fetch per coin per SIGNAL_REFRESH_SECS
         self._ohlcv_cache: Dict[str, List] = {}
         self._last_ohlcv_time: Dict[str, float] = {}
+        self._ohlcv_5m_cache: Dict[str, List] = {}
+        self._last_ohlcv_5m_time: Dict[str, float] = {}
 
         bot_state.register_close(self._close_by_coin)
 
@@ -88,7 +90,7 @@ class TradingBot:
         }
 
     def _get_ohlcv(self, coin: str) -> List:
-        """Cached 1m OHLCV for coin; refreshed every SIGNAL_REFRESH_SECS."""
+        """Cached 1m OHLCV; refreshed every SIGNAL_REFRESH_SECS."""
         now = time.time()
         if now - self._last_ohlcv_time.get(coin, 0) > SIGNAL_REFRESH_SECS:
             try:
@@ -97,17 +99,30 @@ class TradingBot:
                 )
                 self._last_ohlcv_time[coin] = now
             except Exception as e:
-                logger.debug(f"OHLCV fetch {coin}: {e}")
+                logger.debug(f"OHLCV 1m {coin}: {e}")
         return self._ohlcv_cache.get(coin, [])
 
+    def _get_ohlcv_5m(self, coin: str) -> List:
+        """Cached 5m OHLCV for multi-timeframe confirmation; refreshed every 60s."""
+        now = time.time()
+        if now - self._last_ohlcv_5m_time.get(coin, 0) > 60:
+            try:
+                self._ohlcv_5m_cache[coin] = self.exchange.fetch_ohlcv(
+                    _sym(coin), "5m", limit=40
+                )
+                self._last_ohlcv_5m_time[coin] = now
+            except Exception as e:
+                logger.debug(f"OHLCV 5m {coin}: {e}")
+        return self._ohlcv_5m_cache.get(coin, [])
+
     def _strategy_signal(self, coin: str) -> str:
-        """Strategy signal from the auto-selector (EMA/RSI/MACD/BB)."""
-        ohlcv = self._get_ohlcv(coin)
+        """Strategy signal from the auto-selector with full OHLCV + 5m MTF."""
+        ohlcv    = self._get_ohlcv(coin)
+        ohlcv_5m = self._get_ohlcv_5m(coin)
         if not ohlcv:
             return "HOLD"
-        closes = [c[4] for c in ohlcv]
         try:
-            sig = get_signal(closes)
+            sig = get_signal(ohlcv, ohlcv_5m)
             bot_state.update(active_strategy=active_strategy())
             return sig
         except Exception as e:
