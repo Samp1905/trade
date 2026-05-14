@@ -37,6 +37,7 @@ class TradingBot:
         self.exchange = ccxt.krakenfutures({
             "apiKey": os.environ["KRAKEN_API_KEY"],
             "secret": os.environ["KRAKEN_API_SECRET"],
+            "timeout": 30000,  # 30s timeout (default is 10s)
         })
         self.exchange.set_sandbox_mode(True)
         self.exchange.load_markets()
@@ -58,10 +59,13 @@ class TradingBot:
     def _equity(self) -> float:
         now = time.time()
         if now - self._last_equity_time > EQUITY_REFRESH_SECS:
-            self._cached_equity = float(
-                self.exchange.fetch_balance()["USD"]["total"]
-            )
-            self._last_equity_time = now
+            try:
+                self._cached_equity = float(
+                    self.exchange.fetch_balance()["USD"]["total"]
+                )
+                self._last_equity_time = now
+            except Exception:
+                pass  # return stale cache on timeout
         return self._cached_equity
 
     def _batch_prices(self, coins: list) -> Dict[str, float]:
