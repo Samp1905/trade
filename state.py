@@ -9,12 +9,9 @@ class BotState:
         self._lock = Lock()
         self.equity: float = 0.0
         self.day_open_equity: float = 0.0
-        self.price: float = 0.0
         self.signal: str = "—"
-        self.position_side: Optional[str] = None
-        self.position_size: float = 0.0
-        self.position_entry_px: float = 0.0
-        self.unrealized_pnl: float = 0.0
+        self.positions: list = []       # list of {coin, side, size, entry_px, upnl}
+        self.news_signals: dict = {}    # {coin: "BUY"/"SELL"}
         self.halted: bool = False
         self.last_tick: Optional[float] = None
         self.recent_trades: list = []
@@ -26,7 +23,7 @@ class BotState:
 
     def add_trade(self, trade: dict) -> None:
         with self._lock:
-            self.recent_trades = ([trade] + self.recent_trades)[:10]
+            self.recent_trades = ([trade] + self.recent_trades)[:20]
 
     def to_dict(self) -> dict:
         with self._lock:
@@ -44,12 +41,9 @@ class BotState:
                 "equity_pct": round(pct, 3),
                 "drawdown_used_pct": round(drawdown_used, 3),
                 "kill_switch_pct": KILL_SWITCH_DRAWDOWN * 100,
-                "price": self.price,
                 "signal": self.signal,
-                "position_side": self.position_side,
-                "position_size": self.position_size,
-                "position_entry_px": self.position_entry_px,
-                "unrealized_pnl": self.unrealized_pnl,
+                "positions": list(self.positions),
+                "news_signals": dict(self.news_signals),
                 "halted": self.halted,
                 "last_tick": self.last_tick,
                 "recent_trades": list(self.recent_trades),

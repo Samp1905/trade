@@ -7,7 +7,7 @@ _HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>SOL Bot Dashboard</title>
+  <title>Crypto Bot Dashboard</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
   <style>
     body { background: #0f1117; color: #e0e0e0; }
@@ -19,10 +19,8 @@ _HTML = """<!DOCTYPE html>
     .neutral  { color: #e0e0e0; }
     .badge-running { background: #22c55e; }
     .badge-halted  { background: #ef4444; }
-    .signal-BUY  { color: #22c55e; font-weight: 700; }
-    .signal-SELL { color: #ef4444; font-weight: 700; }
-    .signal-HOLD { color: #facc15; font-weight: 700; }
-    .signal-dash { color: #888; }
+    .badge-buy  { background: #22c55e; font-size:.7rem; }
+    .badge-sell { background: #ef4444; font-size:.7rem; }
     .progress { background: #2a2d3a; height: 8px; }
     table { font-size: .85rem; }
     th { color: #888; font-weight: 500; }
@@ -34,14 +32,14 @@ _HTML = """<!DOCTYPE html>
 
   <!-- Header -->
   <div class="d-flex align-items-center justify-content-between mb-4">
-    <h5 class="mb-0 fw-semibold">SOL/USD Perp &mdash; Kraken Futures Demo</h5>
+    <h5 class="mb-0 fw-semibold">Kraken Futures Demo &mdash; News-Driven Multi-Coin Bot</h5>
     <div class="d-flex align-items-center gap-3">
       <span id="status-badge" class="badge rounded-pill px-3 py-2">—</span>
       <span id="last-update">—</span>
     </div>
   </div>
 
-  <!-- Stat cards row -->
+  <!-- Stat cards -->
   <div class="row g-3 mb-3">
     <div class="col-6 col-md-3">
       <div class="card p-3">
@@ -57,19 +55,19 @@ _HTML = """<!DOCTYPE html>
     </div>
     <div class="col-6 col-md-3">
       <div class="card p-3">
-        <div class="card-title">SOL Price</div>
-        <div class="stat neutral" id="price">—</div>
+        <div class="card-title">Open Positions</div>
+        <div class="stat neutral" id="pos-count">—</div>
       </div>
     </div>
     <div class="col-6 col-md-3">
       <div class="card p-3">
-        <div class="card-title">Signal</div>
-        <div class="stat" id="signal">—</div>
+        <div class="card-title">Last Signal</div>
+        <div class="stat neutral" id="signal">—</div>
       </div>
     </div>
   </div>
 
-  <!-- Kill switch + Position row -->
+  <!-- Kill switch + News signals -->
   <div class="row g-3 mb-3">
     <div class="col-md-4">
       <div class="card p-3 h-100">
@@ -85,30 +83,21 @@ _HTML = """<!DOCTYPE html>
     </div>
     <div class="col-md-8">
       <div class="card p-3 h-100">
-        <div class="card-title mb-2">Open Position</div>
-        <div id="position-flat" class="text-secondary">Flat — no open position</div>
-        <div id="position-detail" style="display:none">
-          <div class="row">
-            <div class="col-4">
-              <small class="text-secondary d-block">Side</small>
-              <span id="pos-side" class="fw-semibold"></span>
-            </div>
-            <div class="col-4">
-              <small class="text-secondary d-block">Size (contracts)</small>
-              <span id="pos-size"></span>
-            </div>
-            <div class="col-4">
-              <small class="text-secondary d-block">Entry Price</small>
-              <span id="pos-entry"></span>
-            </div>
-          </div>
-          <div class="mt-2">
-            <small class="text-secondary d-block">Unrealized P&amp;L</small>
-            <span id="pos-upnl" class="fw-semibold"></span>
-          </div>
-        </div>
+        <div class="card-title mb-2">News Signals</div>
+        <div id="news-none" class="text-secondary">No news signals yet.</div>
+        <div id="news-badges" class="d-flex flex-wrap gap-2"></div>
       </div>
     </div>
+  </div>
+
+  <!-- Open positions table -->
+  <div class="card p-3 mb-3">
+    <div class="card-title mb-2">Open Positions</div>
+    <div id="no-positions" class="text-secondary">Flat — no open positions.</div>
+    <table id="pos-table" class="table table-dark table-sm mb-0" style="display:none">
+      <thead><tr><th>Coin</th><th>Side</th><th>Size</th><th>Entry</th><th>Unrealized P&amp;L</th></tr></thead>
+      <tbody id="pos-body"></tbody>
+    </table>
   </div>
 
   <!-- Recent trades -->
@@ -116,76 +105,72 @@ _HTML = """<!DOCTYPE html>
     <div class="card-title mb-3">Recent Trades</div>
     <div id="no-trades" class="text-secondary">No trades yet.</div>
     <table id="trades-table" class="table table-dark table-sm mb-0" style="display:none">
-      <thead>
-        <tr>
-          <th>Time</th><th>Action</th><th>Side</th><th>Size</th><th>Price</th><th>Order ID</th>
-        </tr>
-      </thead>
+      <thead><tr><th>Time</th><th>Coin</th><th>Action</th><th>Side</th><th>Size</th><th>Price</th><th>Order ID</th></tr></thead>
       <tbody id="trades-body"></tbody>
     </table>
   </div>
 
 </div>
-
 <script>
 function fmt(n, dec=2) { return n == null ? '—' : Number(n).toFixed(dec); }
-function fmtTime(ts) {
-  if (!ts) return '—';
-  return new Date(ts * 1000).toLocaleTimeString();
-}
+function fmtTime(ts) { return ts ? new Date(ts*1000).toLocaleTimeString() : '—'; }
 
 async function refresh() {
   let s;
-  try { s = await fetch('/api/state').then(r => r.json()); }
-  catch { return; }
+  try { s = await fetch('/api/state').then(r => r.json()); } catch { return; }
 
-  // Status badge
   const badge = document.getElementById('status-badge');
   badge.textContent = s.halted ? 'HALTED' : 'RUNNING';
   badge.className = 'badge rounded-pill px-3 py-2 ' + (s.halted ? 'badge-halted' : 'badge-running');
-
-  // Last update
   document.getElementById('last-update').textContent = 'Last tick: ' + fmtTime(s.last_tick);
 
-  // Cards
-  document.getElementById('equity').textContent = '$' + fmt(s.equity, 2);
-
+  document.getElementById('equity').textContent = '$' + fmt(s.equity);
   const pnlEl = document.getElementById('pnl');
-  const pnl = s.equity_pct;
-  pnlEl.textContent = (pnl >= 0 ? '+' : '') + fmt(pnl, 3) + '%';
-  pnlEl.className = 'stat ' + (pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'neutral');
+  pnlEl.textContent = (s.equity_pct >= 0 ? '+' : '') + fmt(s.equity_pct, 3) + '%';
+  pnlEl.className = 'stat ' + (s.equity_pct > 0 ? 'positive' : s.equity_pct < 0 ? 'negative' : 'neutral');
 
-  document.getElementById('price').textContent = '$' + fmt(s.price, 4);
+  document.getElementById('pos-count').textContent = (s.positions || []).length + ' / 3';
+  document.getElementById('signal').textContent = s.signal || '—';
 
-  const sigEl = document.getElementById('signal');
-  sigEl.textContent = s.signal;
-  sigEl.className = 'stat signal-' + (s.signal === '—' ? 'dash' : s.signal);
-
-  // Kill switch bar
+  // Kill switch
   const pct = Math.min(100, (s.drawdown_used_pct / s.kill_switch_pct) * 100);
   const bar = document.getElementById('ks-bar');
   bar.style.width = pct + '%';
   bar.className = 'progress-bar rounded-pill ' + (pct > 80 ? 'bg-danger' : pct > 50 ? 'bg-warning' : 'bg-success');
   document.getElementById('ks-label').textContent = fmt(s.drawdown_used_pct, 3) + '%';
-  document.getElementById('ks-limit').textContent = 'limit: ' + fmt(s.kill_switch_pct, 1) + '%';
 
-  // Position
-  if (s.position_side) {
-    document.getElementById('position-flat').style.display = 'none';
-    document.getElementById('position-detail').style.display = '';
-    document.getElementById('pos-side').textContent = s.position_side.toUpperCase();
-    document.getElementById('pos-side').className = 'fw-semibold ' + (s.position_side === 'long' ? 'positive' : 'negative');
-    document.getElementById('pos-size').textContent = fmt(s.position_size, 4);
-    document.getElementById('pos-entry').textContent = '$' + fmt(s.position_entry_px, 4);
-    const upnl = document.getElementById('pos-upnl');
-    upnl.textContent = (s.unrealized_pnl >= 0 ? '+' : '') + '$' + fmt(s.unrealized_pnl, 2);
-    upnl.className = 'fw-semibold ' + (s.unrealized_pnl >= 0 ? 'positive' : 'negative');
+  // News signals
+  const ns = s.news_signals || {};
+  const coins = Object.keys(ns);
+  if (coins.length === 0) {
+    document.getElementById('news-none').style.display = '';
+    document.getElementById('news-badges').innerHTML = '';
   } else {
-    document.getElementById('position-flat').style.display = '';
-    document.getElementById('position-detail').style.display = 'none';
+    document.getElementById('news-none').style.display = 'none';
+    document.getElementById('news-badges').innerHTML = coins.map(c =>
+      `<span class="badge rounded-pill badge-${ns[c].toLowerCase()} px-2 py-1">${c} ${ns[c]}</span>`
+    ).join('');
   }
 
-  // Trades
+  // Open positions
+  const positions = s.positions || [];
+  if (positions.length === 0) {
+    document.getElementById('no-positions').style.display = '';
+    document.getElementById('pos-table').style.display = 'none';
+  } else {
+    document.getElementById('no-positions').style.display = 'none';
+    document.getElementById('pos-table').style.display = '';
+    document.getElementById('pos-body').innerHTML = positions.map(p => `
+      <tr>
+        <td class="fw-semibold">${p.coin}</td>
+        <td class="${p.side === 'long' ? 'positive' : 'negative'}">${p.side.toUpperCase()}</td>
+        <td>${fmt(p.size, 4)}</td>
+        <td>$${fmt(p.entry_px, 4)}</td>
+        <td class="${p.upnl >= 0 ? 'positive' : 'negative'}">${p.upnl >= 0 ? '+' : ''}$${fmt(p.upnl, 2)}</td>
+      </tr>`).join('');
+  }
+
+  // Recent trades
   const trades = s.recent_trades || [];
   if (trades.length === 0) {
     document.getElementById('no-trades').style.display = '';
@@ -193,10 +178,10 @@ async function refresh() {
   } else {
     document.getElementById('no-trades').style.display = 'none';
     document.getElementById('trades-table').style.display = '';
-    const tbody = document.getElementById('trades-body');
-    tbody.innerHTML = trades.map(t => `
+    document.getElementById('trades-body').innerHTML = trades.map(t => `
       <tr>
         <td>${fmtTime(t.time)}</td>
+        <td class="fw-semibold">${t.coin || '—'}</td>
         <td>${t.action}</td>
         <td class="${t.side === 'long' ? 'positive' : 'negative'}">${t.side.toUpperCase()}</td>
         <td>${fmt(t.size, 4)}</td>
