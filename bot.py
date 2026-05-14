@@ -1,7 +1,7 @@
 import logging
 import os
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import ccxt
 from dotenv import load_dotenv
@@ -14,19 +14,21 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-POSITION_SIZE_USD   = 10.0
+POSITION_SIZE_USD    = 10.0
 KILL_SWITCH_DRAWDOWN = 0.05
-LOOP_INTERVAL_SECS  = 30        # check every 30s — aligns with 1m candle rhythm
-TRADE_COOLDOWN_SECS = 30        # allow re-entry 30s after last trade
-TAKE_PROFIT_USD     = 0.02      # exit at $0.02 profit
-STOP_LOSS_PCT       = 0.10      # exit at 10% loss
-MAX_POSITIONS       = 3
-SIGNAL_REFRESH_SECS = 60        # re-evaluate strategy on 1m candles every 60s
-EQUITY_REFRESH_SECS = 30
-FIVE_MIN_MOVE_PCT   = 0.10
+LOOP_INTERVAL_SECS   = 10       # tick every 10s — catches every candle move
+TRADE_COOLDOWN_SECS  = 10       # re-entry allowed 10s after last trade
+TAKE_PROFIT_USD      = 0.02     # exit at $0.02 profit
+STOP_LOSS_PCT        = 0.10     # exit at 10% loss
+MAX_POSITIONS        = 3
+SIGNAL_REFRESH_SECS  = 15       # refresh 1m OHLCV every 15s
+NEWS_REFRESH_SECS    = 60       # CoinGecko poll (rate-limit friendly)
+EQUITY_REFRESH_SECS  = 30
+FIVE_MIN_MOVE_PCT    = 0.10
+CANDLE_BODY_PCT      = 0.0005   # 0.05% live candle body triggers momentum entry
 
 # SOL is always watched; news/5m movers add more coins dynamically
-DEFAULT_WATCHLIST  = {"SOL"}
+DEFAULT_WATCHLIST = {"SOL"}
 
 
 def _sym(coin: str) -> str:
@@ -38,7 +40,7 @@ class TradingBot:
         self.exchange = ccxt.krakenfutures({
             "apiKey": os.environ["KRAKEN_API_KEY"],
             "secret": os.environ["KRAKEN_API_SECRET"],
-            "timeout": 30000,  # 30s timeout (default is 10s)
+            "timeout": 30000,
         })
         self.exchange.set_sandbox_mode(True)
         self.exchange.load_markets()
@@ -51,9 +53,11 @@ class TradingBot:
         self._last_trade_time: Dict[str, float] = {}
         self._last_news_refresh: float = 0.0
         self._news_signals: Dict[str, str] = {}
-        self._prev_prices: Dict[str, float] = {}    # for tick momentum
-        self._strat_signals: Dict[str, str] = {}    # cached strategy signals per coin
-        self._last_strat_time: Dict[str, float] = {}
+
+        # Shared OHLCV cache — one fetch per coin per SIGNAL_REFRESH_SECS
+        self._ohlcv_cache: Dict[str, List] = {}
+        self._last_ohlcv_time: Dict[str, float] = {}
+
         bot_state.register_close(self._close_by_coin)
 
     # ------------------------------------------------------------------ #
@@ -69,11 +73,10 @@ class TradingBot:
                 )
                 self._last_equity_time = now
             except Exception:
-                pass  # return stale cache on timeout
+                pass
         return self._cached_equity
 
     def _batch_prices(self, coins: list) -> Dict[str, float]:
-        """Fetch all coin prices in one API call."""
         syms = [_sym(c) for c in coins if _sym(c) in self.exchange.markets]
         if not syms:
             return {}
@@ -84,19 +87,52 @@ class TradingBot:
             if t.get("last")
         }
 
-    def _strategy_signal(self, coin: str) -> str:
-        """Return cached strategy signal for coin; refreshes every 60s."""
+    def _get_ohlcv(self, coin: str) -> List:
+        """Cached 1m OHLCV for coin; refreshed every SIGNAL_REFRESH_SECS."""
         now = time.time()
-        if now - self._last_strat_time.get(coin, 0) > SIGNAL_REFRESH_SECS:
+        if now - self._last_ohlcv_time.get(coin, 0) > SIGNAL_REFRESH_SECS:
             try:
-                ohlcv = self.exchange.fetch_ohlcv(_sym(coin), "1m", limit=100)
-                closes = [c[4] for c in ohlcv]
-                self._strat_signals[coin] = get_signal(closes)
-                self._last_strat_time[coin] = now
-                bot_state.update(active_strategy=active_strategy())
+                self._ohlcv_cache[coin] = self.exchange.fetch_ohlcv(
+                    _sym(coin), "1m", limit=100
+                )
+                self._last_ohlcv_time[coin] = now
             except Exception as e:
-                logger.debug(f"Strategy refresh {coin}: {e}")
-        return self._strat_signals.get(coin, "HOLD")
+                logger.debug(f"OHLCV fetch {coin}: {e}")
+        return self._ohlcv_cache.get(coin, [])
+
+    def _strategy_signal(self, coin: str) -> str:
+        """Strategy signal from the auto-selector (EMA/RSI/MACD/BB)."""
+        ohlcv = self._get_ohlcv(coin)
+        if not ohlcv:
+            return "HOLD"
+        closes = [c[4] for c in ohlcv]
+        try:
+            sig = get_signal(closes)
+            bot_state.update(active_strategy=active_strategy())
+            return sig
+        except Exception as e:
+            logger.debug(f"Strategy signal {coin}: {e}")
+            return "HOLD"
+
+    def _candle_signal(self, coin: str) -> Optional[str]:
+        """
+        Live candle-body momentum signal.
+        Fires BUY/SELL when the current 1m candle has moved >= CANDLE_BODY_PCT
+        from its open — catches moves as they develop, not just on completion.
+        """
+        ohlcv = self._get_ohlcv(coin)
+        if len(ohlcv) < 1:
+            return None
+        candle = ohlcv[-1]          # in-progress candle
+        o, c = candle[1], candle[4]
+        if o == 0:
+            return None
+        move = (c - o) / o
+        if move >= CANDLE_BODY_PCT:
+            return "BUY"
+        if move <= -CANDLE_BODY_PCT:
+            return "SELL"
+        return None
 
     def _all_positions(self) -> Dict[str, dict]:
         result = {}
@@ -115,11 +151,7 @@ class TradingBot:
 
     def _place_order(self, sym: str, side: str, size: float,
                      ask: float, bid: float, params: dict = None) -> dict:
-        """
-        Limit GTC at the current ask (buy) or bid (sell).
-        Exact ask/bid stays inside the price collar; GTC means it fills when
-        the market touches that price rather than being cancelled if the tick moves.
-        """
+        """Limit GTC at the current ask (buy) or bid (sell)."""
         is_buy = side == "buy"
         lp = float(self.exchange.price_to_precision(sym, ask if is_buy else bid))
         p = {**(params or {})}
@@ -129,7 +161,6 @@ class TradingBot:
                 self.exchange.create_limit_sell_order(sym, size, lp, params=p))
 
     def _fetch_bid_ask(self, sym: str) -> tuple:
-        """Returns (last, ask, bid) from a fresh ticker."""
         t = self.exchange.fetch_ticker(sym)
         last = float(t["last"] or 0)
         ask = float(t["ask"] or last)
@@ -166,7 +197,6 @@ class TradingBot:
         })
 
     def _close_by_coin(self, coin: str) -> dict:
-        """Called from dashboard manual-close button."""
         positions = self._all_positions()
         if coin == "__all__":
             closed = []
@@ -180,7 +210,7 @@ class TradingBot:
         return {"closed": [coin]}
 
     # ------------------------------------------------------------------ #
-    # Risk checks (run every tick)                                         #
+    # Risk checks                                                          #
     # ------------------------------------------------------------------ #
 
     def _check_take_profits(self, positions: Dict[str, dict],
@@ -221,11 +251,11 @@ class TradingBot:
                 positions.pop(coin, None)
 
     # ------------------------------------------------------------------ #
-    # Watchlist / signals                                                  #
+    # Watchlist / news                                                     #
     # ------------------------------------------------------------------ #
 
     def _refresh_news(self) -> None:
-        if time.time() - self._last_news_refresh < SIGNAL_REFRESH_SECS:
+        if time.time() - self._last_news_refresh < NEWS_REFRESH_SECS:
             return
         news = get_news_signals()
         movers = self._scan_5m_movers()
@@ -255,14 +285,6 @@ class TradingBot:
                 logger.debug(f"5m scan {coin}: {e}")
         return signals
 
-    def _tick_signal(self, coin: str, price: float) -> Optional[str]:
-        """BUY if price ticked up, SELL if down, None if unchanged."""
-        prev = self._prev_prices.get(coin)
-        self._prev_prices[coin] = price
-        if prev is None or price == prev:
-            return None
-        return "BUY" if price > prev else "SELL"
-
     # ------------------------------------------------------------------ #
     # Main tick                                                            #
     # ------------------------------------------------------------------ #
@@ -282,15 +304,12 @@ class TradingBot:
 
         self._refresh_news()
 
-        # Build watchlist: default + news/5m movers
         watchlist = DEFAULT_WATCHLIST | set(self._news_signals.keys())
         watchlist = {c for c in watchlist if _sym(c) in self.exchange.markets}
 
-        # Fetch all prices in one call
         prices = self._batch_prices(list(watchlist))
         open_positions = self._all_positions()
 
-        # Update dashboard
         bot_state.update(positions=[
             {"coin": c, "side": p["side"],
              "size": abs(float(p["contracts"])),
@@ -299,30 +318,30 @@ class TradingBot:
             for c, p in open_positions.items()
         ])
 
-        # Risk checks first
         self._check_take_profits(open_positions, prices)
         self._check_stop_losses(open_positions, prices)
 
-        # Entry logic — 1m candle strategy signal is the sole trigger
         for coin in watchlist:
             try:
                 price = prices.get(coin)
                 if not price:
                     continue
-
                 if open_positions.get(coin):
                     continue
-
                 if len(open_positions) >= MAX_POSITIONS:
                     break
-
                 since_last = time.time() - self._last_trade_time.get(coin, 0)
                 if since_last < TRADE_COOLDOWN_SECS:
                     continue
 
-                # Strategy signal from 1m candles — this alone fires the trade
+                # Strategy signal (EMA/RSI/MACD/BB on 1m closes)
                 signal = self._strategy_signal(coin)
+
+                # Live candle-body momentum overrides HOLD
                 if signal == "HOLD":
+                    signal = self._candle_signal(coin)
+
+                if not signal or signal == "HOLD":
                     continue
 
                 logger.info(
@@ -346,7 +365,7 @@ class TradingBot:
     # ------------------------------------------------------------------ #
 
     def run(self) -> None:
-        logger.info("Bot starting — Kraken Futures scalper (2s loop, $0.02 TP, 10% SL)")
+        logger.info("Bot starting — Kraken Futures scalper (10s loop, $0.02 TP, 10% SL)")
         self._day_open_equity = self._equity()
         bot_state.update(day_open_equity=self._day_open_equity, equity=self._day_open_equity)
         logger.info(f"Day-open equity: ${self._day_open_equity:.2f}")
