@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 from news import get_news_signals, COIN_MAP
 from state import bot_state
+from strategy import get_signal, active_strategy
 
 load_dotenv()
 
@@ -50,7 +51,9 @@ class TradingBot:
         self._last_trade_time: Dict[str, float] = {}
         self._last_news_refresh: float = 0.0
         self._news_signals: Dict[str, str] = {}
-        self._prev_prices: Dict[str, float] = {}   # for tick momentum
+        self._prev_prices: Dict[str, float] = {}    # for tick momentum
+        self._strat_signals: Dict[str, str] = {}    # cached strategy signals per coin
+        self._last_strat_time: Dict[str, float] = {}
 
     # ------------------------------------------------------------------ #
     # Data helpers                                                         #
@@ -79,6 +82,20 @@ class TradingBot:
             for sym, t in tickers.items()
             if t.get("last")
         }
+
+    def _strategy_signal(self, coin: str) -> str:
+        """Return cached strategy signal for coin; refreshes every 60s."""
+        now = time.time()
+        if now - self._last_strat_time.get(coin, 0) > NEWS_REFRESH_SECS:
+            try:
+                ohlcv = self.exchange.fetch_ohlcv(_sym(coin), "1m", limit=RSI_CANDLE_COUNT)
+                closes = [c[4] for c in ohlcv]
+                self._strat_signals[coin] = get_signal(closes)
+                self._last_strat_time[coin] = now
+                bot_state.update(active_strategy=active_strategy())
+            except Exception as e:
+                logger.debug(f"Strategy refresh {coin}: {e}")
+        return self._strat_signals.get(coin, "HOLD")
 
     def _all_positions(self) -> Dict[str, dict]:
         result = {}
@@ -272,12 +289,20 @@ class TradingBot:
                 if tick is None:
                     continue
 
-                # For news/5m coins: only enter if tick agrees with news direction
+                # Strategy must agree with tick direction
+                strat = self._strategy_signal(coin)
+                if strat != "HOLD" and strat != tick:
+                    continue
+
+                # For news/5m coins: news direction must also agree
                 news_dir = self._news_signals.get(coin)
                 if news_dir and news_dir != tick:
                     continue
 
-                logger.info(f"{coin}: tick={tick} price=${price:.4f}")
+                logger.info(
+                    f"{coin}: tick={tick} strategy={strat} "
+                    f"({active_strategy()}) price=${price:.4f}"
+                )
                 bot_state.update(signal=f"{coin}:{tick}")
                 self._enter(coin, tick, price)
                 open_positions[coin] = True

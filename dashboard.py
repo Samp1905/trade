@@ -61,8 +61,9 @@ _HTML = """<!DOCTYPE html>
     </div>
     <div class="col-6 col-md-3">
       <div class="card p-3">
-        <div class="card-title">Last Signal</div>
-        <div class="stat neutral" id="signal">—</div>
+        <div class="card-title">Active Strategy</div>
+        <div class="stat neutral" id="active-strategy" style="font-size:1rem">—</div>
+        <div class="text-secondary mt-1" style="font-size:.8rem" id="signal">—</div>
       </div>
     </div>
   </div>
@@ -130,7 +131,8 @@ async function refresh() {
   pnlEl.className = 'stat ' + (s.equity_pct > 0 ? 'positive' : s.equity_pct < 0 ? 'negative' : 'neutral');
 
   document.getElementById('pos-count').textContent = (s.positions || []).length + ' / 3';
-  document.getElementById('signal').textContent = s.signal || '—';
+  document.getElementById('active-strategy').textContent = s.active_strategy || '—';
+  document.getElementById('signal').textContent = 'Last: ' + (s.signal || '—');
 
   // Kill switch
   const pct = Math.min(100, (s.drawdown_used_pct / s.kill_switch_pct) * 100);

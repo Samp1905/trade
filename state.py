@@ -10,6 +10,7 @@ class BotState:
         self.equity: float = 0.0
         self.day_open_equity: float = 0.0
         self.signal: str = "—"
+        self.active_strategy: str = "—"
         self.positions: list = []       # list of {coin, side, size, entry_px, upnl}
         self.news_signals: dict = {}    # {coin: "BUY"/"SELL"}
         self.halted: bool = False
@@ -42,6 +43,7 @@ class BotState:
                 "drawdown_used_pct": round(drawdown_used, 3),
                 "kill_switch_pct": KILL_SWITCH_DRAWDOWN * 100,
                 "signal": self.signal,
+                "active_strategy": self.active_strategy,
                 "positions": list(self.positions),
                 "news_signals": dict(self.news_signals),
                 "halted": self.halted,
