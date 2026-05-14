@@ -13,6 +13,8 @@ class BotState:
         self.active_strategy: str = "—"
         self.positions: list = []       # list of {coin, side, size, entry_px, upnl}
         self.news_signals: dict = {}    # {coin: "BUY"/"SELL"}
+        self.fear_greed: int = 50
+        self.fear_greed_label: str = "Neutral"
         self.halted: bool = False
         self.last_tick: Optional[float] = None
         self.recent_trades: list = []
@@ -59,6 +61,8 @@ class BotState:
                 "active_strategy": self.active_strategy,
                 "positions": list(self.positions),
                 "news_signals": dict(self.news_signals),
+                "fear_greed": self.fear_greed,
+                "fear_greed_label": self.fear_greed_label,
                 "halted": self.halted,
                 "last_tick": self.last_tick,
                 "recent_trades": list(self.recent_trades),

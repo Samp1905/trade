@@ -68,9 +68,19 @@ _HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Kill switch + News signals -->
+  <!-- Kill switch + Fear/Greed + News signals -->
   <div class="row g-3 mb-3">
-    <div class="col-md-4">
+    <div class="col-md-3">
+      <div class="card p-3 h-100 text-center">
+        <div class="card-title mb-1">Fear &amp; Greed</div>
+        <div id="fg-value" class="stat">—</div>
+        <div id="fg-label" class="text-secondary mt-1" style="font-size:.8rem">—</div>
+        <div class="progress mt-2 rounded-pill">
+          <div id="fg-bar" class="progress-bar rounded-pill" style="width:50%"></div>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-3">
       <div class="card p-3 h-100">
         <div class="card-title mb-2">Kill Switch Drawdown</div>
         <div class="d-flex justify-content-between mb-1">
@@ -82,7 +92,7 @@ _HTML = """<!DOCTYPE html>
         </div>
       </div>
     </div>
-    <div class="col-md-8">
+    <div class="col-md-6">
       <div class="card p-3 h-100">
         <div class="card-title mb-2">News Signals</div>
         <div id="news-none" class="text-secondary">No news signals yet.</div>
@@ -136,6 +146,15 @@ async function refresh() {
   document.getElementById('pos-count').textContent = (s.positions || []).length + ' / 3';
   document.getElementById('active-strategy').textContent = s.active_strategy || '—';
   document.getElementById('signal').textContent = 'Last: ' + (s.signal || '—');
+
+  // Fear & Greed
+  const fg = s.fear_greed ?? 50;
+  document.getElementById('fg-value').textContent = fg;
+  document.getElementById('fg-label').textContent = s.fear_greed_label || '—';
+  const fgBar = document.getElementById('fg-bar');
+  fgBar.style.width = fg + '%';
+  fgBar.className = 'progress-bar rounded-pill ' +
+    (fg <= 25 ? 'bg-danger' : fg <= 45 ? 'bg-warning' : fg <= 55 ? 'bg-secondary' : fg <= 75 ? 'bg-info' : 'bg-success');
 
   // Kill switch
   const pct = Math.min(100, (s.drawdown_used_pct / s.kill_switch_pct) * 100);

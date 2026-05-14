@@ -6,9 +6,9 @@ from typing import Dict, List, Optional
 import ccxt
 from dotenv import load_dotenv
 
-from news import get_news_signals, COIN_MAP
+from news import get_news_signals, get_fear_greed, COIN_MAP
 from state import bot_state
-from strategy import get_signal, active_strategy
+from strategy import get_signal, active_strategy, _ema, _rsi, _vwap
 
 load_dotenv()
 
@@ -148,6 +148,32 @@ class TradingBot:
         if move <= -CANDLE_BODY_PCT:
             return "SELL"
         return None
+
+    def _news_chart_signal(self, coin: str) -> Optional[str]:
+        """
+        News-driven strategy: headline/CoinGecko signal confirmed by chart.
+        News gives the directional bias; VWAP + EMA + RSI must agree (2-of-3)
+        before the trade fires. Prevents chasing stale news on exhausted moves.
+        """
+        news_sig = self._news_signals.get(coin)
+        if not news_sig:
+            return None
+        ohlcv = self._get_ohlcv(coin)
+        if not ohlcv or len(ohlcv) < 25:
+            return news_sig             # no chart data yet — trust news alone
+        closes = [c[4] for c in ohlcv]
+        price  = closes[-1]
+        vwap   = _vwap(ohlcv)
+        e9     = _ema(closes, 9)
+        e21    = _ema(closes, 21)
+        rsi14  = _rsi(closes, 14)
+
+        if news_sig == "BUY":
+            bull_count = (price > vwap) + (e9 > e21) + (rsi14 > 50)
+            return "BUY" if bull_count >= 2 else None
+        else:  # SELL
+            bear_count = (price < vwap) + (e9 < e21) + (rsi14 < 50)
+            return "SELL" if bear_count >= 2 else None
 
     def _all_positions(self) -> Dict[str, dict]:
         result = {}
@@ -291,7 +317,9 @@ class TradingBot:
         movers = self._scan_5m_movers()
         self._news_signals = {**news, **movers}
         self._last_news_refresh = time.time()
-        bot_state.update(news_signals=self._news_signals)
+        fg_val, fg_label = get_fear_greed()
+        bot_state.update(news_signals=self._news_signals,
+                         fear_greed=fg_val, fear_greed_label=fg_label)
 
     def _scan_5m_movers(self) -> Dict[str, str]:
         signals = {}
@@ -364,19 +392,24 @@ class TradingBot:
                 if since_last < TRADE_COOLDOWN_SECS:
                     continue
 
-                # Strategy is the primary trigger; candle momentum is a secondary boost
+                # Signal priority: news+chart > technical strategy > candle momentum
+                news   = self._news_chart_signal(coin)
                 strat  = self._strategy_signal(coin)
                 candle = self._candle_signal(coin)
 
-                if strat != "HOLD":
-                    signal = strat           # strategy fires → trade
+                if news is not None:
+                    signal = news            # news + chart confirmed → highest priority
+                elif strat != "HOLD":
+                    signal = strat           # technical strategy
                 elif candle is not None:
-                    signal = candle          # no strategy signal → candle momentum
+                    signal = candle          # candle momentum fallback
                 else:
                     continue
 
+                source = "NEWS" if news else ("STRAT" if strat != "HOLD" else "CANDLE")
+
                 logger.info(
-                    f"{coin}: signal={signal} strategy={active_strategy()} "
+                    f"{coin}: [{source}] signal={signal} strategy={active_strategy()} "
                     f"price=${price:.4f}"
                 )
                 bot_state.update(signal=f"{coin}:{signal}")
