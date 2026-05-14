@@ -21,6 +21,7 @@ RSI_CANDLE_COUNT = 60
 TRADE_COOLDOWN_SECS = 60
 NEWS_REFRESH_SECS = 60
 MAX_POSITIONS = 3           # max concurrent open positions
+STOP_LOSS_PCT = 0.10        # close position if loss reaches 10% of entry value
 
 
 def _sym(coin: str) -> str:
@@ -112,6 +113,28 @@ class TradingBot:
     # Core logic                                                           #
     # ------------------------------------------------------------------ #
 
+    def _check_stop_losses(self) -> None:
+        for coin, pos in self._all_positions().items():
+            try:
+                entry = float(pos.get("entryPrice") or 0)
+                if entry == 0:
+                    continue
+                current = self._price(coin)
+                side = pos["side"]
+                loss_pct = (
+                    (entry - current) / entry if side == "long"
+                    else (current - entry) / entry
+                )
+                if loss_pct >= STOP_LOSS_PCT:
+                    logger.warning(
+                        f"STOP LOSS hit on {coin} {side.upper()} — "
+                        f"entry=${entry:.4f} current=${current:.4f} "
+                        f"loss={loss_pct*100:.2f}%"
+                    )
+                    self._exit(coin, pos)
+            except Exception as e:
+                logger.error(f"Stop loss check error on {coin}: {e}")
+
     def _check_kill_switch(self, equity: float) -> bool:
         if self._day_open_equity is None:
             return False
@@ -140,6 +163,7 @@ class TradingBot:
             bot_state.update(halted=True)
             return
 
+        self._check_stop_losses()
         self._refresh_news()
 
         if not self._news_signals:
