@@ -36,7 +36,7 @@ class TradingBot:
         self.exchange.set_sandbox_mode(True)
         self.exchange.load_markets()
 
-        self._news_api_key: str = os.environ.get("CRYPTOPANIC_API_KEY", "")
+        self._news_api_key: str = ""  # no longer needed — using CoinGecko free API
         self._day_open_equity: Optional[float] = None
         self._halted = False
         self._last_trade_time: Dict[str, float] = {}
@@ -142,10 +142,6 @@ class TradingBot:
 
         self._refresh_news()
 
-        # Fallback to SOL if no news API key configured
-        if not self._news_api_key:
-            self._news_signals = {"SOL": "BUY"}
-
         if not self._news_signals:
             logger.info("No news signals. Waiting...")
             return
@@ -222,8 +218,7 @@ class TradingBot:
     # ------------------------------------------------------------------ #
 
     def run(self) -> None:
-        mode = "news-driven multi-coin" if self._news_api_key else "SOL only (no news key)"
-        logger.info(f"Bot starting — Kraken Futures demo [{mode}]")
+        logger.info("Bot starting — Kraken Futures demo [CoinGecko news-driven multi-coin]")
         self._day_open_equity = self._equity()
         bot_state.update(day_open_equity=self._day_open_equity, equity=self._day_open_equity)
         logger.info(f"Day-open equity: ${self._day_open_equity:.2f}")
