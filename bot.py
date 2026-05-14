@@ -14,16 +14,16 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-POSITION_SIZE_USD  = 10.0
+POSITION_SIZE_USD   = 10.0
 KILL_SWITCH_DRAWDOWN = 0.05
-LOOP_INTERVAL_SECS = 2          # check every 2 seconds
-TRADE_COOLDOWN_SECS = 2         # allow new entry 2 seconds after last trade
-TAKE_PROFIT_USD    = 0.02       # close position at $0.02 profit
-STOP_LOSS_PCT      = 0.10       # close position at 10% loss
-MAX_POSITIONS      = 3
-NEWS_REFRESH_SECS  = 60
-EQUITY_REFRESH_SECS = 10        # cache equity to reduce API calls
-FIVE_MIN_MOVE_PCT  = 0.10
+LOOP_INTERVAL_SECS  = 30        # check every 30s — aligns with 1m candle rhythm
+TRADE_COOLDOWN_SECS = 30        # allow re-entry 30s after last trade
+TAKE_PROFIT_USD     = 0.02      # exit at $0.02 profit
+STOP_LOSS_PCT       = 0.10      # exit at 10% loss
+MAX_POSITIONS       = 3
+SIGNAL_REFRESH_SECS = 60        # re-evaluate strategy on 1m candles every 60s
+EQUITY_REFRESH_SECS = 30
+FIVE_MIN_MOVE_PCT   = 0.10
 
 # SOL is always watched; news/5m movers add more coins dynamically
 DEFAULT_WATCHLIST  = {"SOL"}
@@ -86,9 +86,9 @@ class TradingBot:
     def _strategy_signal(self, coin: str) -> str:
         """Return cached strategy signal for coin; refreshes every 60s."""
         now = time.time()
-        if now - self._last_strat_time.get(coin, 0) > NEWS_REFRESH_SECS:
+        if now - self._last_strat_time.get(coin, 0) > SIGNAL_REFRESH_SECS:
             try:
-                ohlcv = self.exchange.fetch_ohlcv(_sym(coin), "1m", limit=RSI_CANDLE_COUNT)
+                ohlcv = self.exchange.fetch_ohlcv(_sym(coin), "1m", limit=100)
                 closes = [c[4] for c in ohlcv]
                 self._strat_signals[coin] = get_signal(closes)
                 self._last_strat_time[coin] = now
@@ -189,7 +189,7 @@ class TradingBot:
     # ------------------------------------------------------------------ #
 
     def _refresh_news(self) -> None:
-        if time.time() - self._last_news_refresh < NEWS_REFRESH_SECS:
+        if time.time() - self._last_news_refresh < SIGNAL_REFRESH_SECS:
             return
         news = get_news_signals()
         movers = self._scan_5m_movers()
@@ -267,7 +267,7 @@ class TradingBot:
         self._check_take_profits(open_positions, prices)
         self._check_stop_losses(open_positions, prices)
 
-        # Entry logic
+        # Entry logic — 1m candle strategy signal is the sole trigger
         for coin in watchlist:
             try:
                 price = prices.get(coin)
@@ -275,7 +275,7 @@ class TradingBot:
                     continue
 
                 if open_positions.get(coin):
-                    continue  # already in this coin
+                    continue
 
                 if len(open_positions) >= MAX_POSITIONS:
                     break
@@ -284,27 +284,17 @@ class TradingBot:
                 if since_last < TRADE_COOLDOWN_SECS:
                     continue
 
-                # Tick momentum: direction of latest price move
-                tick = self._tick_signal(coin, price)
-                if tick is None:
-                    continue
-
-                # Strategy must agree with tick direction
-                strat = self._strategy_signal(coin)
-                if strat != "HOLD" and strat != tick:
-                    continue
-
-                # For news/5m coins: news direction must also agree
-                news_dir = self._news_signals.get(coin)
-                if news_dir and news_dir != tick:
+                # Strategy signal from 1m candles — this alone fires the trade
+                signal = self._strategy_signal(coin)
+                if signal == "HOLD":
                     continue
 
                 logger.info(
-                    f"{coin}: tick={tick} strategy={strat} "
-                    f"({active_strategy()}) price=${price:.4f}"
+                    f"{coin}: signal={signal} strategy={active_strategy()} "
+                    f"price=${price:.4f}"
                 )
-                bot_state.update(signal=f"{coin}:{tick}")
-                self._enter(coin, tick, price)
+                bot_state.update(signal=f"{coin}:{signal}")
+                self._enter(coin, signal, price)
                 open_positions[coin] = True
 
             except Exception as e:
