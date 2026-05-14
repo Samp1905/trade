@@ -24,6 +24,7 @@ MAX_POSITIONS       = 3
 SIGNAL_REFRESH_SECS = 60        # re-evaluate strategy on 1m candles every 60s
 EQUITY_REFRESH_SECS = 30
 FIVE_MIN_MOVE_PCT   = 0.10
+SLIPPAGE_PCT        = 0.003     # 0.3% limit-IOC slippage to stay inside price collar
 
 # SOL is always watched; news/5m movers add more coins dynamically
 DEFAULT_WATCHLIST  = {"SOL"}
@@ -113,13 +114,23 @@ class TradingBot:
     # Order helpers                                                        #
     # ------------------------------------------------------------------ #
 
+    def _limit_ioc(self, sym: str, side: str, size: float,
+                   ref_price: float, params: dict = None) -> dict:
+        """Limit IOC order at ref_price ± slippage — avoids Kraken price-collar rejection."""
+        is_buy = side == "buy"
+        lp = ref_price * (1 + SLIPPAGE_PCT) if is_buy else ref_price * (1 - SLIPPAGE_PCT)
+        lp = float(self.exchange.price_to_precision(sym, lp))
+        p = {"timeInForce": "ioc", **(params or {})}
+        return (self.exchange.create_limit_buy_order(sym, size, lp, params=p)
+                if is_buy else
+                self.exchange.create_limit_sell_order(sym, size, lp, params=p))
+
     def _enter(self, coin: str, signal: str, price: float) -> None:
         sym = _sym(coin)
         is_buy = signal == "BUY"
         size = float(self.exchange.amount_to_precision(sym, POSITION_SIZE_USD / price))
-        logger.info(f"ENTER {'LONG' if is_buy else 'SHORT'} {size} {sym} @ ${price:.4f}")
-        result = (self.exchange.create_market_buy_order(sym, size) if is_buy
-                  else self.exchange.create_market_sell_order(sym, size))
+        logger.info(f"ENTER {'LONG' if is_buy else 'SHORT'} {size} {sym} @ ~${price:.4f}")
+        result = self._limit_ioc(sym, "buy" if is_buy else "sell", size, price)
         self._last_trade_time[coin] = time.time()
         bot_state.add_trade({
             "time": time.time(), "action": "ENTER", "coin": coin,
@@ -132,12 +143,11 @@ class TradingBot:
         sym = _sym(coin)
         size = abs(float(pos["contracts"]))
         side = pos["side"]
-        params = {"reduceOnly": True}
-        result = (self.exchange.create_market_sell_order(sym, size, params=params)
-                  if side == "long" else
-                  self.exchange.create_market_buy_order(sym, size, params=params))
         price = float(self.exchange.fetch_ticker(sym)["last"])
-        logger.info(f"{reason} {side.upper()} {size} {sym} @ ${price:.4f}")
+        # sell to exit long, buy to exit short; reduceOnly + IOC avoids price-collar error
+        exit_side = "sell" if side == "long" else "buy"
+        result = self._limit_ioc(sym, exit_side, size, price, {"reduceOnly": True})
+        logger.info(f"{reason} {side.upper()} {size} {sym} @ ~${price:.4f}")
         bot_state.add_trade({
             "time": time.time(), "action": reason, "coin": coin,
             "side": side, "size": size, "price": price,
