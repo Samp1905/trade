@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 from news import get_news_signals, get_fear_greed, COIN_MAP
 from state import bot_state
-from strategy import get_signal, active_strategy, _ema, _rsi, _vwap
+from strategy import get_signal, active_strategy, _ema, _rsi, _sma, _vwap
 
 load_dotenv()
 
@@ -60,6 +60,10 @@ class TradingBot:
         self._ohlcv_5m_cache: Dict[str, List] = {}
         self._last_ohlcv_5m_time: Dict[str, float] = {}
 
+        # SMA200+RSI10 strategy state
+        self._entry_swing_lows: Dict[str, float] = {}   # coin → swing low at entry
+        self._prev_rsi10: Dict[str, float] = {}          # coin → RSI(10) last tick
+
         bot_state.register_close(self._close_by_coin)
 
     # ------------------------------------------------------------------ #
@@ -95,7 +99,7 @@ class TradingBot:
         if now - self._last_ohlcv_time.get(coin, 0) > SIGNAL_REFRESH_SECS:
             try:
                 self._ohlcv_cache[coin] = self.exchange.fetch_ohlcv(
-                    _sym(coin), "1m", limit=100
+                    _sym(coin), "1m", limit=210    # 210 needed for SMA 200
                 )
                 self._last_ohlcv_time[coin] = now
             except Exception as e:
@@ -148,6 +152,50 @@ class TradingBot:
         if move <= -CANDLE_BODY_PCT:
             return "SELL"
         return None
+
+    def _recent_swing_low(self, coin: str, entry_price: float) -> float:
+        """Most recent local low in last 20 candles — used as stop loss level."""
+        ohlcv = self._get_ohlcv(coin)
+        if not ohlcv:
+            return entry_price * 0.995
+        lows = [c[3] for c in ohlcv[-20:]]
+        for i in range(len(lows) - 2, 0, -1):
+            if lows[i] <= lows[i - 1] and lows[i] <= lows[i + 1]:
+                sl = lows[i] * 0.9995      # tiny buffer below the swing
+                return sl if sl < entry_price else min(lows) * 0.9995
+        return min(lows) * 0.9995
+
+    def _check_rsi_exits(self, positions: Dict[str, dict]) -> None:
+        """Exit long positions when RSI(10) crosses above 40."""
+        for coin, pos in list(positions.items()):
+            if pos.get("side") != "long":
+                continue
+            ohlcv = self._get_ohlcv(coin)
+            if not ohlcv or len(ohlcv) < 12:
+                continue
+            closes   = [c[4] for c in ohlcv]
+            curr_rsi = _rsi(closes, 10)
+            prev_rsi = self._prev_rsi10.get(coin, curr_rsi)
+            self._prev_rsi10[coin] = curr_rsi
+            if prev_rsi <= 40 and curr_rsi > 40:
+                logger.info(f"RSI(10) EXIT {coin}: {prev_rsi:.1f}→{curr_rsi:.1f} crossed 40")
+                self._exit(coin, pos, reason="RSI EXIT")
+                positions.pop(coin, None)
+
+    def _check_swing_low_stops(self, positions: Dict[str, dict],
+                                prices: Dict[str, float]) -> None:
+        """Exit long positions that close below the entry swing low."""
+        for coin, pos in list(positions.items()):
+            if pos.get("side") != "long":
+                continue
+            sl = self._entry_swing_lows.get(coin)
+            if sl is None:
+                continue
+            current = prices.get(coin, 0)
+            if current and current < sl:
+                logger.warning(f"SWING LOW STOP {coin}: ${current:.4f} < swing low ${sl:.4f}")
+                self._exit(coin, pos, reason="SWING LOW STOP")
+                positions.pop(coin, None)
 
     def _news_chart_signal(self, coin: str) -> Optional[str]:
         """
@@ -227,7 +275,11 @@ class TradingBot:
         size = float(self.exchange.amount_to_precision(sym, POSITION_SIZE_USD / price))
         self._cancel_open_orders(coin)
         last, ask, bid = self._fetch_bid_ask(sym)
-        logger.info(f"ENTER {'LONG' if is_buy else 'SHORT'} {size} {sym} @ ~${last:.4f}")
+        if is_buy:
+            self._entry_swing_lows[coin] = self._recent_swing_low(coin, last)
+            logger.info(f"ENTER LONG {size} {sym} @ ~${last:.4f}  SL swing-low=${self._entry_swing_lows[coin]:.4f}")
+        else:
+            logger.info(f"ENTER SHORT {size} {sym} @ ~${last:.4f}")
         result = self._place_order(sym, "buy" if is_buy else "sell", size, ask, bid)
         self._last_trade_time[coin] = time.time()
         bot_state.add_trade({
@@ -378,6 +430,8 @@ class TradingBot:
 
         self._check_take_profits(open_positions, prices)
         self._check_stop_losses(open_positions, prices)
+        self._check_rsi_exits(open_positions)
+        self._check_swing_low_stops(open_positions, prices)
 
         for coin in watchlist:
             try:

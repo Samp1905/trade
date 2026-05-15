@@ -73,6 +73,12 @@ def _vwap(ohlcv: List) -> float:
     return cum_tv / cum_v if cum_v > 0 else (ohlcv[-1][4] if ohlcv else 0.0)
 
 
+def _sma(closes: List[float], period: int) -> float:
+    if len(closes) < period:
+        return closes[-1] if closes else 0.0
+    return sum(closes[-period:]) / period
+
+
 def _supertrend(ohlcv: List, period: int = 10, mult: float = 3.0) -> str:
     if len(ohlcv) < period + 2:
         return "up"
@@ -195,7 +201,26 @@ def strategy_donchian_breakout(ohlcv: List, _=None) -> Signal:
     return "HOLD"
 
 
+def strategy_sma200_rsi10(ohlcv: List, _=None) -> Signal:
+    """
+    SMA 200 trend filter + RSI(10) oversold entry.
+    Bullish-only: only BUY when price > SMA(200) and RSI(10) < 30.
+    Exit is handled separately (RSI cross above 40, swing-low stop loss).
+    """
+    if len(ohlcv) < 201:
+        return "HOLD"
+    closes = [c[4] for c in ohlcv]
+    sma200 = _sma(closes, 200)
+    price  = closes[-1]
+    if price <= sma200:
+        return "HOLD"           # price below SMA 200 — no trades
+    if _rsi(closes, 10) < 30:
+        return "BUY"            # oversold pullback inside uptrend
+    return "HOLD"
+
+
 STRATEGIES: Dict[str, Callable] = {
+    "SMA200+RSI10":      strategy_sma200_rsi10,
     "VWAP+EMA+RSI":      strategy_vwap_ema_rsi,
     "StochRSI+EMA50":    strategy_stoch_rsi_ema50,
     "Supertrend MTF":    strategy_supertrend_mtf,
