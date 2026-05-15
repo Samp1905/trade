@@ -43,7 +43,17 @@ class TradingBot:
             "timeout": 30000,
         })
         self.exchange.set_sandbox_mode(True)
-        self.exchange.load_markets()
+        # Retry load_markets — Kraken demo occasionally returns 503 on startup
+        for attempt in range(1, 6):
+            try:
+                self.exchange.load_markets()
+                break
+            except Exception as e:
+                if attempt == 5:
+                    raise
+                wait = attempt * 10
+                logger.warning(f"load_markets attempt {attempt} failed ({e}) — retrying in {wait}s")
+                time.sleep(wait)
 
         self._day_open_equity: Optional[float] = None
         self._halted = False

@@ -21,10 +21,20 @@ def _start_dashboard():
 
 
 def _run_bot():
-    try:
-        TradingBot().run()
-    except Exception as e:
-        log.error(f"Bot crashed: {e}", exc_info=True)
+    """Auto-restart the bot after any crash, with exponential backoff."""
+    delay = 15
+    while True:
+        try:
+            TradingBot().run()
+        except Exception as e:
+            log.error(f"Bot crashed: {e}", exc_info=True)
+            log.info(f"Restarting bot in {delay}s …")
+            time.sleep(delay)
+            delay = min(delay * 2, 120)   # back off up to 2 min between retries
+        else:
+            # run() returned normally (halted) — stop retrying
+            log.info("Bot stopped cleanly.")
+            break
 
 
 if __name__ == "__main__":
