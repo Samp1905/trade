@@ -18,39 +18,25 @@ import requests
 logger = logging.getLogger(__name__)
 
 # CoinGecko ID → Kraken ticker
+# Only coins that trade well on Kraken Futures with clean signals.
+# BTC/DOGE/LINK/XRP/ATOM removed — they were the largest loss sources.
 COIN_MAP = {
-    "bitcoin":      "BTC",
     "ethereum":     "ETH",
     "solana":       "SOL",
-    "ripple":       "XRP",
-    "dogecoin":     "DOGE",
     "cardano":      "ADA",
-    "avalanche-2":  "AVAX",
-    "chainlink":    "LINK",
     "polkadot":     "DOT",
-    "litecoin":     "LTC",
-    "bitcoin-cash": "BCH",
     "uniswap":      "UNI",
-    "cosmos":       "ATOM",
-    "matic-network":"MATIC",
+    "litecoin":     "LTC",
 }
 
 # Text keywords for each coin (used in headline scanning)
 _COIN_KEYWORDS: Dict[str, set] = {
-    "BTC":  {"bitcoin", "btc"},
     "ETH":  {"ethereum", "eth", "ether"},
     "SOL":  {"solana", "sol"},
-    "XRP":  {"ripple", "xrp"},
-    "DOGE": {"dogecoin", "doge"},
     "ADA":  {"cardano", "ada"},
-    "AVAX": {"avalanche", "avax"},
-    "LINK": {"chainlink", "link"},
     "DOT":  {"polkadot", "dot"},
-    "LTC":  {"litecoin", "ltc"},
-    "BCH":  {"bitcoin cash", "bch"},
     "UNI":  {"uniswap", "uni"},
-    "ATOM": {"cosmos", "atom"},
-    "MATIC":{"polygon", "matic"},
+    "LTC":  {"litecoin", "ltc"},
 }
 
 _POSITIVE = {
@@ -74,7 +60,7 @@ _RSS_FEEDS = [
 COINGECKO_TRENDING = "https://api.coingecko.com/api/v3/search/trending"
 COINGECKO_MARKETS  = "https://api.coingecko.com/api/v3/coins/markets"
 FEAR_GREED_URL     = "https://api.alternative.me/fng/?limit=1"
-MOVE_THRESHOLD_PCT = 1.5
+MOVE_THRESHOLD_PCT = 3.0   # raised from 1.5 — require stronger move to signal
 
 
 def get_fear_greed() -> Tuple[int, str]:
@@ -166,16 +152,14 @@ def get_news_signals(_api_key: str = "") -> Dict[str, str]:
         elif score <= -2:
             signals[coin] = "SELL"
 
-    # 2. CoinGecko price momentum (merges with RSS)
+    # 2. CoinGecko price momentum (only CONFIRMS existing RSS signals)
+    # CoinGecko cannot add new coins on its own — this prevents noise coins
+    # like BTC (always trending) from flooding the watchlist.
     cg = _coingecko_signals()
-    for coin, sig in cg.items():
-        if coin not in signals:
-            signals[coin] = sig                     # CG adds new coins
-        elif signals[coin] == sig:
-            pass                                    # agree — keep
-        # RSS and CG disagree → drop coin (conflicting signals)
-        else:
-            del signals[coin]
+    for coin in list(signals.keys()):
+        cg_sig = cg.get(coin)
+        if cg_sig is not None and cg_sig != signals[coin]:
+            del signals[coin]   # RSS and CG disagree → drop
 
     # 3. Fear & Greed filter — extreme readings suppress counter-sentiment trades
     fg_val, fg_label = get_fear_greed()

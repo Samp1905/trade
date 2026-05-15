@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 import ccxt
 from dotenv import load_dotenv
 
-from news import get_news_signals, get_fear_greed, COIN_MAP
+from news import get_news_signals, get_fear_greed
 from state import bot_state
 from strategy import get_signal, active_strategy, _ema, _rsi, _sma, _vwap
 
@@ -24,7 +24,7 @@ MAX_POSITIONS        = 5        # max 5 concurrent positions
 SIGNAL_REFRESH_SECS  = 15       # refresh 1m OHLCV every 15s
 NEWS_REFRESH_SECS    = 60       # CoinGecko poll (rate-limit friendly)
 EQUITY_REFRESH_SECS  = 30
-FIVE_MIN_MOVE_PCT    = 0.10
+MAX_NEWS_COINS       = 3        # at most 3 news coins on top of default watchlist
 
 # SOL is always watched; news/5m movers add more coins dynamically
 DEFAULT_WATCHLIST = {"SOL"}
@@ -372,34 +372,14 @@ class TradingBot:
         if time.time() - self._last_news_refresh < NEWS_REFRESH_SECS:
             return
         news = get_news_signals()
-        movers = self._scan_5m_movers()
-        self._news_signals = {**news, **movers}
+        # Cap to MAX_NEWS_COINS to prevent watchlist explosion
+        if len(news) > MAX_NEWS_COINS:
+            news = dict(list(news.items())[:MAX_NEWS_COINS])
+        self._news_signals = news
         self._last_news_refresh = time.time()
         fg_val, fg_label = get_fear_greed()
         bot_state.update(news_signals=self._news_signals,
                          fear_greed=fg_val, fear_greed_label=fg_label)
-
-    def _scan_5m_movers(self) -> Dict[str, str]:
-        signals = {}
-        for coin in COIN_MAP.values():
-            try:
-                sym = _sym(coin)
-                if sym not in self.exchange.markets:
-                    continue
-                ohlcv = self.exchange.fetch_ohlcv(sym, "5m", limit=2)
-                if len(ohlcv) < 2:
-                    continue
-                o, c = ohlcv[-2][1], ohlcv[-2][4]
-                if o == 0:
-                    continue
-                move = (c - o) / o
-                if move >= FIVE_MIN_MOVE_PCT:
-                    signals[coin] = "BUY"
-                elif move <= -FIVE_MIN_MOVE_PCT:
-                    signals[coin] = "SELL"
-            except Exception as e:
-                logger.debug(f"5m scan {coin}: {e}")
-        return signals
 
     # ------------------------------------------------------------------ #
     # Main tick                                                            #
