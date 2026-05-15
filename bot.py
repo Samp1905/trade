@@ -16,16 +16,15 @@ logger = logging.getLogger(__name__)
 
 POSITION_SIZE_USD    = 2000.0
 KILL_SWITCH_DRAWDOWN = 0.05
-LOOP_INTERVAL_SECS   = 10       # tick every 10s — catches every candle move
-TRADE_COOLDOWN_SECS  = 10       # re-entry allowed 10s after last trade
-TAKE_PROFIT_PCT      = 0.0015   # exit at 0.15% price gain (~$3 on $2000)
-STOP_LOSS_PCT        = 0.001    # exit at 0.10% price loss (~$2 on $2000) — 1.5:1 R/R
-MAX_POSITIONS        = 20
+LOOP_INTERVAL_SECS   = 10       # tick every 10s
+TRADE_COOLDOWN_SECS  = 60       # minimum 60s between trades per coin
+TAKE_PROFIT_PCT      = 0.004    # exit at 0.4% gain (~$8 on $2000)
+STOP_LOSS_PCT        = 0.002    # exit at 0.2% loss (~$4 on $2000) — 2:1 R/R
+MAX_POSITIONS        = 5        # max 5 concurrent positions
 SIGNAL_REFRESH_SECS  = 15       # refresh 1m OHLCV every 15s
 NEWS_REFRESH_SECS    = 60       # CoinGecko poll (rate-limit friendly)
 EQUITY_REFRESH_SECS  = 30
 FIVE_MIN_MOVE_PCT    = 0.10
-CANDLE_BODY_PCT      = 0.0005   # 0.05% live candle body — quick momentum trigger
 
 # SOL is always watched; news/5m movers add more coins dynamically
 DEFAULT_WATCHLIST = {"SOL"}
@@ -143,25 +142,22 @@ class TradingBot:
             logger.debug(f"Strategy signal {coin}: {e}")
             return "HOLD"
 
-    def _candle_signal(self, coin: str) -> Optional[str]:
+    def _htf_trend_gate(self, coin: str, signal: str) -> bool:
         """
-        Live candle-body momentum signal.
-        Fires BUY/SELL when the current 1m candle has moved >= CANDLE_BODY_PCT
-        from its open — catches moves as they develop, not just on completion.
+        Allow a signal only when the 5m EMA9/EMA21 trend agrees.
+        Prevents buying into a downtrend and selling into an uptrend.
         """
-        ohlcv = self._get_ohlcv(coin)
-        if len(ohlcv) < 1:
-            return None
-        candle = ohlcv[-1]          # in-progress candle
-        o, c = candle[1], candle[4]
-        if o == 0:
-            return None
-        move = (c - o) / o
-        if move >= CANDLE_BODY_PCT:
-            return "BUY"
-        if move <= -CANDLE_BODY_PCT:
-            return "SELL"
-        return None
+        ohlcv_5m = self._get_ohlcv_5m(coin)
+        if len(ohlcv_5m) < 25:
+            return True     # not enough data — don't block
+        closes_5m = [c[4] for c in ohlcv_5m]
+        e9  = _ema(closes_5m, 9)
+        e21 = _ema(closes_5m, 21)
+        if signal == "BUY"  and e9 > e21:
+            return True
+        if signal == "SELL" and e9 < e21:
+            return True
+        return False
 
     def _recent_swing_low(self, coin: str, entry_price: float) -> float:
         """Most recent local low in last 20 candles — used as stop loss level."""
@@ -456,21 +452,23 @@ class TradingBot:
                 if since_last < TRADE_COOLDOWN_SECS:
                     continue
 
-                # Signal priority: news+chart > technical strategy > candle momentum
-                news   = self._news_chart_signal(coin)
-                strat  = self._strategy_signal(coin)
-                candle = self._candle_signal(coin)
+                # Signal priority: news+chart > technical strategy
+                news  = self._news_chart_signal(coin)
+                strat = self._strategy_signal(coin)
 
                 if news is not None:
-                    signal = news            # news + chart confirmed → highest priority
+                    signal = news
                 elif strat != "HOLD":
-                    signal = strat           # technical strategy
-                elif candle is not None:
-                    signal = candle          # candle momentum fallback
+                    signal = strat
                 else:
                     continue
 
-                source = "NEWS" if news else ("STRAT" if strat != "HOLD" else "CANDLE")
+                # 5m trend gate — only trade with the higher-timeframe trend
+                if not self._htf_trend_gate(coin, signal):
+                    logger.debug(f"{coin}: {signal} blocked by 5m trend gate")
+                    continue
+
+                source = "NEWS" if news else "STRAT"
 
                 logger.info(
                     f"{coin}: [{source}] signal={signal} strategy={active_strategy()} "

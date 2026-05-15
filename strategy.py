@@ -79,6 +79,42 @@ def _sma(closes: List[float], period: int) -> float:
     return sum(closes[-period:]) / period
 
 
+def _adx(ohlcv: List, period: int = 14) -> float:
+    """Average Directional Index — trend strength. >20 = trending, <20 = choppy."""
+    if len(ohlcv) < period + 2:
+        return 0.0
+    highs  = [c[2] for c in ohlcv]
+    lows   = [c[3] for c in ohlcv]
+    closes = [c[4] for c in ohlcv]
+    n = len(ohlcv)
+    tr_list, pdm_list, ndm_list = [highs[0] - lows[0]], [0.0], [0.0]
+    for i in range(1, n):
+        tr_list.append(max(highs[i] - lows[i],
+                           abs(highs[i] - closes[i - 1]),
+                           abs(lows[i]  - closes[i - 1])))
+        up   = highs[i]  - highs[i - 1]
+        down = lows[i - 1] - lows[i]
+        pdm_list.append(up   if up > down and up > 0   else 0.0)
+        ndm_list.append(down if down > up and down > 0 else 0.0)
+    atr = sum(tr_list[:period])
+    pdm = sum(pdm_list[:period])
+    ndm = sum(ndm_list[:period])
+    dx_list: List[float] = []
+    for i in range(period, n):
+        atr = atr - atr / period + tr_list[i]
+        pdm = pdm - pdm / period + pdm_list[i]
+        ndm = ndm - ndm / period + ndm_list[i]
+        pdi = 100 * pdm / atr if atr else 0.0
+        ndi = 100 * ndm / atr if atr else 0.0
+        dx_list.append(100 * abs(pdi - ndi) / (pdi + ndi) if (pdi + ndi) else 0.0)
+    if len(dx_list) < period:
+        return 0.0
+    adx = sum(dx_list[:period]) / period
+    for dx in dx_list[period:]:
+        adx = (adx * (period - 1) + dx) / period
+    return adx
+
+
 def _supertrend(ohlcv: List, period: int = 10, mult: float = 3.0) -> str:
     if len(ohlcv) < period + 2:
         return "up"
@@ -119,19 +155,23 @@ def _supertrend(ohlcv: List, period: int = 10, mult: float = 3.0) -> str:
 
 def strategy_vwap_ema_rsi(ohlcv: List, _=None) -> Signal:
     """
-    VWAP bias + EMA9/21 alignment.
-    Fires whenever price and both EMAs agree on direction relative to VWAP.
+    VWAP bias + EMA9/21 alignment + RSI momentum + ADX trend filter.
+    Only fires in trending markets (ADX > 20) with RSI not overbought/oversold.
     """
-    if len(ohlcv) < 25:
+    if len(ohlcv) < 30:
         return "HOLD"
     closes = [c[4] for c in ohlcv]
     vwap   = _vwap(ohlcv)
     price  = closes[-1]
     e9     = _ema(closes, 9)
     e21    = _ema(closes, 21)
-    if price > vwap and e9 > e21:
+    rsi14  = _rsi(closes, 14)
+    adx    = _adx(ohlcv)
+    if adx < 20:
+        return "HOLD"   # choppy / no trend
+    if price > vwap and e9 > e21 and 40 < rsi14 < 70:
         return "BUY"
-    if price < vwap and e9 < e21:
+    if price < vwap and e9 < e21 and 30 < rsi14 < 60:
         return "SELL"
     return "HOLD"
 
@@ -269,19 +309,8 @@ def get_signal(ohlcv: List, ohlcv_5m: Optional[List] = None) -> Signal:
         _reselect(ohlcv, ohlcv_5m)
         _last_eval = now
 
-    # Primary: best-scored strategy
-    sig = STRATEGIES[_active](ohlcv, ohlcv_5m)
-    if sig != "HOLD":
-        return sig
-
-    # Fallback: scan remaining strategies — first non-HOLD wins
-    for name, fn in STRATEGIES.items():
-        if name == _active:
-            continue
-        s = fn(ohlcv, ohlcv_5m)
-        if s != "HOLD":
-            return s
-    return "HOLD"
+    # Only fire when the best-scored strategy gives a signal — no fallback scan
+    return STRATEGIES[_active](ohlcv, ohlcv_5m)
 
 
 def active_strategy() -> str:
